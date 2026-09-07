@@ -25,7 +25,8 @@ import {
   AlcoLicenseType, 
   AlcoLicensePayload, 
   AlcoLicenseRecord, 
-  OwnerKeyPair 
+  OwnerKeyPair,
+  VaultStatus 
 } from '../modules/types';
 import { decodeRequestCode, generateSampleRequestCode } from '../modules/request-code';
 import { createLicensePayload } from '../modules/license-payload';
@@ -33,17 +34,25 @@ import { signCanonicalPayload, packageLicenseKey } from '../modules/signing';
 import { generateMockDeviceId } from '../modules/device-fingerprint';
 
 interface DashboardViewProps {
-  keyPair: OwnerKeyPair;
+  keyPair: OwnerKeyPair | null;
   registeredApps: AlcoAppDefinition[];
   onSaveLicense: (record: AlcoLicenseRecord) => void;
   onNavigateToSimulator: (licenseKey: string, appId: string, deviceId: string) => void;
+  vaultStatus: VaultStatus;
+  inMemoryPrivateKey: string | null;
+  onRequestUnlock: (onUnlocked: (privateKey: string) => void) => void;
+  onRequestSetup: () => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
   keyPair,
   registeredApps,
   onSaveLicense,
-  onNavigateToSimulator
+  onNavigateToSimulator,
+  vaultStatus,
+  inMemoryPrivateKey,
+  onRequestUnlock,
+  onRequestSetup
 }) => {
   // 1. Request Decoder State
   const [requestCodeInput, setRequestCodeInput] = useState<string>('');
@@ -162,13 +171,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
   };
 
-  // 7. Generate License Key
-  const handleGenerateLicense = () => {
-    if (!selectedAppId || !deviceId || !customerId) {
-      alert('Please ensure App ID, Device ID, and Customer ID are filled.');
-      return;
-    }
-
+  // 7. Execute Signing using decrypted in-memory Ed25519 private key
+  const executeSigning = (privateKeyHex: string) => {
     setIsGenerating(true);
 
     try {
@@ -188,8 +192,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         }
       });
 
-      // Digitally sign canonical payload with Ed25519 private key
-      const signatureHex = signCanonicalPayload(canonicalPayload, keyPair.privateKeyHex);
+      // Digitally sign canonical payload with decrypted Ed25519 private key
+      const signatureHex = signCanonicalPayload(canonicalPayload, privateKeyHex);
       const licenseKey = packageLicenseKey(canonicalPayload, signatureHex);
 
       setGeneratedLicense({
@@ -205,6 +209,28 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     } finally {
       setIsGenerating(false);
     }
+  };
+
+  // Triggered on button click
+  const handleGenerateLicense = () => {
+    if (!selectedAppId || !deviceId || !customerId) {
+      alert('Please ensure App ID, Device ID, and Customer ID are filled.');
+      return;
+    }
+
+    if (vaultStatus === 'uninitialized') {
+      onRequestSetup();
+      return;
+    }
+
+    if (!inMemoryPrivateKey || vaultStatus === 'locked') {
+      onRequestUnlock((unlockedPrivKey) => {
+        executeSigning(unlockedPrivKey);
+      });
+      return;
+    }
+
+    executeSigning(inMemoryPrivateKey);
   };
 
   // Copy License
@@ -695,14 +721,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             >
               <KeyRound className="w-4 h-4 text-white" />
               <span>
-                {isGenerating ? 'Cryptographically Signing with Ed25519...' : 'GENERATE ALCO LICENSE KEY'}
+                {isGenerating 
+                  ? 'Cryptographically Signing with Ed25519...' 
+                  : vaultStatus === 'locked'
+                  ? 'UNLOCK VAULT & GENERATE LICENSE'
+                  : 'GENERATE ALCO LICENSE KEY'}
               </span>
             </button>
-            {(!deviceId || !customerId) && (
+            {(!deviceId || !customerId) ? (
               <p className="text-center text-xs text-amber-400/80 mt-2">
                 * Please provide Device ID and Customer ID above to sign the license.
               </p>
-            )}
+            ) : vaultStatus === 'locked' ? (
+              <p className="text-center text-[11px] text-slate-400 mt-2 flex items-center justify-center gap-1">
+                <span>🔒</span>
+                <span>Vault is locked. You will be prompted for your Master Password to sign in transient memory.</span>
+              </p>
+            ) : null}
           </section>
         </div>
 

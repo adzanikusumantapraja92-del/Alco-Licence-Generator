@@ -16,7 +16,7 @@ import { AlcoAppDefinition, OwnerKeyPair, AlcoVerificationResult } from '../modu
 import { verifyAlcoLicense } from '../modules/verification';
 
 interface VerifierSimulatorViewProps {
-  keyPair: OwnerKeyPair;
+  keyPair: OwnerKeyPair | null;
   registeredApps: AlcoAppDefinition[];
   initialLicenseKey?: string;
   initialAppId?: string;
@@ -40,6 +40,11 @@ export const VerifierSimulatorView: React.FC<VerifierSimulatorViewProps> = ({
   const handleRunVerification = () => {
     if (!licenseKeyInput.trim()) {
       alert('Please enter a license key to verify.');
+      return;
+    }
+
+    if (!keyPair?.publicKeyHex) {
+      alert('Vault not initialized. Please set up the Owner Vault to establish the authority public key.');
       return;
     }
 

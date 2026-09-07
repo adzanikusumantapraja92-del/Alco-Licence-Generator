@@ -85,7 +85,24 @@ export interface AlcoVerificationResult {
 
 export interface OwnerKeyPair {
   publicKeyHex: string;
-  privateKeyHex: string;
+  privateKeyHex?: string; // Optional: Only present in transient in-memory state, never in storage
   createdAt: string;
   fingerprint: string;
 }
+
+export interface EncryptedOwnerVault {
+  version: '2.0-aes-gcm';
+  algorithm: 'AES-256-GCM';
+  kdf: 'PBKDF2-SHA-256';
+  iterations: number;
+  saltHex: string;
+  ivHex: string;
+  ciphertextHex: string;
+  publicKeyHex: string; // Stored in plaintext for public verification
+  fingerprint: string;  // Public key fingerprint
+  createdAt: string;
+  updatedAt: string;
+  vaultHint?: string;
+}
+
+export type VaultStatus = 'uninitialized' | 'locked' | 'unlocked';
