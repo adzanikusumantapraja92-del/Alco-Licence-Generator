@@ -1,0 +1,6 @@
+{
+  "name": "ALCO License Generator",
+  "description": "Offline cryptographic license generator and manager for Aladzan Corpora Ecosystem (ALCO) desktop applications using Ed25519 asymmetric signatures.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
