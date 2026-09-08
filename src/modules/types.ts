@@ -3,14 +3,28 @@
  */
 
 export interface AlcoRequestCodePayload {
-  version: '1.0';
+  version: '1.0' | '2.0';
   appId: string;
   deviceId: string;
-  customerId: string;
+  customerId?: string;
   customerName?: string;
+  customerEmail?: string;
   requestId: string;
   timestamp: string; // ISO string
   notes?: string;
+}
+
+export interface AlcoCustomerRecord {
+  customerId: string;
+  name: string;
+  email: string;
+  emailNormalized: string;
+  whatsapp?: string;
+  segment?: string;
+  acquisitionSource?: string;
+  marketingConsent?: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type AlcoPlan = 'starter' | 'pro' | 'enterprise' | 'custom';

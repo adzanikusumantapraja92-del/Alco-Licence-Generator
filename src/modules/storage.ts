@@ -22,6 +22,7 @@ import {
 export const STORAGE_KEYS = {
   VAULT: 'alco_encrypted_owner_vault_v2',
   HISTORY: 'alco_license_history_v1',
+  CUSTOMERS: 'alco_customer_registry_v1',
   SETTINGS: 'alco_owner_settings_v1',
   CUSTOM_APPS: 'alco_custom_apps_registry_v1',
   LEGACY_KEYPAIR: 'alco_owner_keypair_v1'

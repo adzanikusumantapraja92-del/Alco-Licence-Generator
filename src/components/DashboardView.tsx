@@ -32,6 +32,11 @@ import { decodeRequestCode, generateSampleRequestCode } from '../modules/request
 import { createLicensePayload } from '../modules/license-payload';
 import { signCanonicalPayload, packageLicenseKey } from '../modules/signing';
 import { generateMockDeviceId } from '../modules/device-fingerprint';
+import {
+  findCustomerByEmail,
+  getLicensesForCustomer,
+  upsertCustomerFromRequest,
+} from '../modules/customer-registry';
 
 interface DashboardViewProps {
   keyPair: OwnerKeyPair | null;
@@ -64,6 +69,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // 2. Customer Information
   const [customerId, setCustomerId] = useState<string>('CUST-ALCO-1001');
   const [customerName, setCustomerName] = useState<string>('');
+  const [customerEmail, setCustomerEmail] = useState<string>('');
+  const [customerRegistryStatus, setCustomerRegistryStatus] = useState<string>('');
   const [requestId, setRequestId] = useState<string>('');
   const [deviceId, setDeviceId] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
@@ -120,11 +127,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
     const res = decodeRequestCode(trimmed);
     if (res.success && res.data) {
-      setDecodeStatus({ success: true, message: 'Valid Request Code decoded successfully' });
-      setCustomerId(res.data.customerId);
+      let resolvedCustomerId = res.data.customerId || '';
+      let registryMessage = '';
+
+      if (res.data.version === '2.0') {
+        const existing = findCustomerByEmail(res.data.customerEmail || '');
+        if (existing) {
+          const licenses = getLicensesForCustomer(existing.customerId);
+          resolvedCustomerId = existing.customerId;
+          registryMessage = `EXISTING CUSTOMER: ${existing.customerId} (${licenses.length} existing ALCO license${licenses.length === 1 ? '' : 's'})`;
+        } else {
+          const created = upsertCustomerFromRequest({
+            name: res.data.customerName || '',
+            email: res.data.customerEmail || '',
+          });
+          resolvedCustomerId = created.customer.customerId;
+          registryMessage = `NEW CUSTOMER: ${created.customer.customerId}`;
+        }
+      }
+
+      setDecodeStatus({ success: true, message: `Valid Request Code decoded successfully${registryMessage ? ` — ${registryMessage}` : ''}` });
+      setCustomerRegistryStatus(registryMessage);
+      setCustomerId(resolvedCustomerId);
       setDeviceId(res.data.deviceId);
       setRequestId(res.data.requestId);
       if (res.data.customerName) setCustomerName(res.data.customerName);
+      if (res.data.customerEmail) setCustomerEmail(res.data.customerEmail);
       if (res.data.notes) setNotes(res.data.notes);
 
       // Auto-match application if exists in registry
@@ -133,6 +161,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         setSelectedAppId(matched.id);
       }
     } else {
+      setCustomerRegistryStatus('');
       setDecodeStatus({ success: false, message: res.error || 'Failed to decode Request Code' });
     }
   };
@@ -262,6 +291,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     setDecodeStatus({ success: null });
     setCustomerId(`CUST-ALCO-${Math.floor(1000 + Math.random() * 9000)}`);
     setCustomerName('');
+    setCustomerEmail('');
+    setCustomerRegistryStatus('');
     setRequestId('');
     setDeviceId('');
     setNotes('');
@@ -411,6 +442,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   placeholder="e.g. John Doe (Studio Media)"
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 text-xs focus:ring-1 focus:ring-indigo-500"
                 />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label htmlFor="input-customer-email" className="block text-xs font-medium text-slate-300 mb-1">
+                  Customer Email
+                </label>
+                <input
+                  id="input-customer-email"
+                  type="email"
+                  value={customerEmail}
+                  onChange={(e) => setCustomerEmail(e.target.value)}
+                  placeholder="customer@example.com"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 text-xs focus:ring-1 focus:ring-indigo-500"
+                />
+                {customerRegistryStatus && (
+                  <p className="text-[11px] text-emerald-300 mt-1">
+                    {customerRegistryStatus}
+                  </p>
+                )}
               </div>
 
               <div className="sm:col-span-2">

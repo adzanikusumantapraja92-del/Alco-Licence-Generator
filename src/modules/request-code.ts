@@ -81,11 +81,19 @@ export function encodeRequestCode(payload: AlcoRequestCodePayload): string {
     throw new Error(`Cannot encode Request Code: invalid hardware device ID format "${payload.deviceId}"`);
   }
 
+  const isV2 = payload.version === '2.0';
+  if (isV2) {
+    if (!payload.customerName?.trim()) throw new Error('Cannot encode Request Code: customer name is required');
+    if (!payload.customerEmail?.trim()) throw new Error('Cannot encode Request Code: customer email is required');
+  } else if (!payload.customerId?.trim()) {
+    throw new Error('Cannot encode Request Code: customerId is required for v1');
+  }
+
   const json = JSON.stringify({
     v: payload.version,
     app: payload.appId.trim(),
     dev: payload.deviceId.trim(),
-    cust: payload.customerId.trim(),
+    ...(isV2 ? { email: payload.customerEmail!.trim() } : { cust: payload.customerId!.trim() }),
     name: payload.customerName?.trim() || '',
     req: payload.requestId.trim(),
     ts: payload.timestamp,
@@ -120,7 +128,7 @@ export function decodeRequestCode(rawInput: string): RequestDecodeResult {
   }
 
   // Check prefix
-  if (!trimmed.startsWith('ALCO-REQ-v1.')) {
+  if (!trimmed.startsWith('ALCO-REQ-v1.') && !trimmed.startsWith('ALCO-REQ-v2.')) {
     // Attempt relaxed parse if owner pasted raw JSON for convenience
     try {
       if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
@@ -150,9 +158,9 @@ export function decodeRequestCode(rawInput: string): RequestDecodeResult {
     } catch {
       // ignore JSON parse fallback error
     }
-    return { 
+    return {
       success: false, 
-      error: 'Invalid format. Expected "ALCO-REQ-v1.<DATA>.<CHECKSUM>"' 
+      error: 'Invalid format. Expected "ALCO-REQ-v1.<DATA>.<CHECKSUM>" or "ALCO-REQ-v2.<DATA>.<CHECKSUM>"'
     };
   }
 
@@ -161,7 +169,8 @@ export function decodeRequestCode(rawInput: string): RequestDecodeResult {
     return { success: false, error: 'Malformed request code structure: expected exactly 3 dot-separated segments' };
   }
 
-  const [, b64Data, checksum] = parts;
+  const [prefix, b64Data, checksum] = parts;
+  const requestVersion = prefix === 'ALCO-REQ-v2' ? '2.0' : '1.0';
 
   // Verify transmission corruption checksum
   const expectedChk = calculateChecksum(b64Data);
@@ -181,10 +190,12 @@ export function decodeRequestCode(rawInput: string): RequestDecodeResult {
       return { success: false, error: 'Malformed request data: decoded payload is not a JSON object' };
     }
 
-    if (!parsed.app || !parsed.dev || !parsed.cust) {
+    if (!parsed.app || !parsed.dev || (requestVersion === '1.0' && !parsed.cust) || (requestVersion === '2.0' && (!parsed.name || !parsed.email))) {
       return { 
         success: false, 
-        error: 'Incomplete request code payload: missing required fields (appId, deviceId, or customerId)' 
+        error: requestVersion === '2.0'
+          ? 'Incomplete request code payload: missing required fields (appId, deviceId, name, or email)'
+          : 'Incomplete request code payload: missing required fields (appId, deviceId, or customerId)'
       };
     }
 
@@ -200,11 +211,12 @@ export function decodeRequestCode(rawInput: string): RequestDecodeResult {
     return {
       success: true,
       data: {
-        version: parsed.v || '1.0',
+        version: requestVersion,
         appId: String(parsed.app).trim(),
         deviceId: devId,
-        customerId: String(parsed.cust).trim(),
+        customerId: parsed.cust ? String(parsed.cust).trim() : undefined,
         customerName: parsed.name ? String(parsed.name).trim() : '',
+        customerEmail: parsed.email ? String(parsed.email).trim() : undefined,
         requestId: parsed.req ? String(parsed.req).trim() : `REQ-${Date.now().toString(36).toUpperCase()}`,
         timestamp: parsed.ts ? String(parsed.ts).trim() : new Date().toISOString(),
         notes: parsed.notes ? String(parsed.notes).trim() : ''
