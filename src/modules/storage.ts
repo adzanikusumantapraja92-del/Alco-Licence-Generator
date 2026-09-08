@@ -11,7 +11,13 @@
 
 import { EncryptedOwnerVault, AlcoLicenseRecord, OwnerKeyPair } from './types';
 import { encryptWithPassword, decryptWithPassword } from './vault-crypto';
-import { generateEd25519KeyPair } from './signing';
+import { 
+  generateEd25519KeyPair, 
+  derivePublicKeyHexFromSecretKey, 
+  isStrictHex, 
+  isValidPublicKeyHex, 
+  isValidSecretKeyHex 
+} from './signing';
 
 export const STORAGE_KEYS = {
   VAULT: 'alco_encrypted_owner_vault_v2',
@@ -377,50 +383,191 @@ export function exportVaultBackup(): string {
   return JSON.stringify(backup, null, 2);
 }
 
+export interface AlcoBackupPayload {
+  alcoVaultVersion: '2.0-encrypted';
+  exportDate: string;
+  encryptedVault: EncryptedOwnerVault;
+  history?: AlcoLicenseRecord[];
+  settings?: OwnerSettings;
+  customApps?: any[];
+}
+
+export interface BackupValidationResult {
+  valid: boolean;
+  error?: string;
+  backup?: AlcoBackupPayload;
+}
+
+export interface BackupVerificationResult {
+  success: boolean;
+  error?: string;
+  isDifferentAuthority?: boolean;
+  activeFingerprint?: string;
+  backupFingerprint?: string;
+  backupPublicKeyHex?: string;
+  recordCount?: number;
+  decryptedPrivateKeyHex?: string;
+}
+
 /**
- * Restores an encrypted vault backup.
- * Requires master password when unlocking the imported vault.
+ * Validates the structure and cryptographic format of a backup file without decrypting
+ */
+export function validateBackupFileFormat(jsonString: string): BackupValidationResult {
+  try {
+    const raw = JSON.parse(jsonString);
+
+    if (raw.alcoVaultVersion !== '2.0-encrypted' || !raw.encryptedVault) {
+      if (raw.alcoVaultVersion === '1.0') {
+        return { 
+          valid: false, 
+          error: 'Legacy v1 unencrypted backup rejected. For security, only AES-256-GCM encrypted backups (v2.0) are supported.' 
+        };
+      }
+      return { 
+        valid: false, 
+        error: 'Invalid backup format: Expected "alcoVaultVersion: 2.0-encrypted".' 
+      };
+    }
+
+    const v = raw.encryptedVault;
+    if (!v || typeof v !== 'object') {
+      return { valid: false, error: 'Malformed backup: Missing encryptedVault object.' };
+    }
+
+    // Strict format validations
+    if (!v.ciphertextHex || typeof v.ciphertextHex !== 'string' || !isStrictHex(v.ciphertextHex)) {
+      return { valid: false, error: 'Corrupted backup: ciphertextHex is missing or not valid hexadecimal.' };
+    }
+
+    if (!v.saltHex || typeof v.saltHex !== 'string' || !isStrictHex(v.saltHex) || v.saltHex.length !== 32) {
+      return { valid: false, error: 'Corrupted backup: saltHex must be exactly 32 hex characters (16 bytes).' };
+    }
+
+    if (!v.ivHex || typeof v.ivHex !== 'string' || !isStrictHex(v.ivHex) || v.ivHex.length !== 24) {
+      return { valid: false, error: 'Corrupted backup: ivHex must be exactly 24 hex characters (12 bytes).' };
+    }
+
+    if (typeof v.iterations !== 'number' || v.iterations < 100000) {
+      return { valid: false, error: 'Insecure backup: PBKDF2 iterations must be at least 100,000.' };
+    }
+
+    if (!v.publicKeyHex || typeof v.publicKeyHex !== 'string' || !isValidPublicKeyHex(v.publicKeyHex)) {
+      return { valid: false, error: 'Corrupted backup: publicKeyHex must be 64 hexadecimal characters.' };
+    }
+
+    if (!v.fingerprint || typeof v.fingerprint !== 'string') {
+      return { valid: false, error: 'Corrupted backup: Missing public key fingerprint.' };
+    }
+
+    return {
+      valid: true,
+      backup: raw as AlcoBackupPayload
+    };
+  } catch (err: any) {
+    return {
+      valid: false,
+      error: `Invalid JSON backup file: ${err?.message || 'Parse error'}`
+    };
+  }
+}
+
+/**
+ * Stage 2 of Backup Restore:
+ * Decrypts backup with provided Master Password, derives Ed25519 public key from private key,
+ * compares against vault public key, and detects Authority Identity mismatch.
+ * DOES NOT save or commit to storage yet.
+ */
+export async function verifyBackupDecryption(
+  backup: AlcoBackupPayload,
+  masterPassword: string
+): Promise<BackupVerificationResult> {
+  try {
+    // 1. Decrypt secret payload
+    const decryptedRaw = await decryptWithPassword(backup.encryptedVault, masterPassword);
+    const secret = JSON.parse(decryptedRaw);
+
+    // 2. Validate private key format (strictly 128 hex chars)
+    if (!secret.privateKeyHex || !isValidSecretKeyHex(secret.privateKeyHex)) {
+      return {
+        success: false,
+        error: 'Decrypted secret payload contains an invalid or malformed Ed25519 private key.'
+      };
+    }
+
+    // 3. Cryptographic derivation check: derive public key from decrypted private key
+    const derived = derivePublicKeyHexFromSecretKey(secret.privateKeyHex);
+    if (derived.publicKeyHex.toLowerCase() !== backup.encryptedVault.publicKeyHex.toLowerCase()) {
+      return {
+        success: false,
+        error: 'Cryptographic integrity failure: Public key derived from decrypted private key does not match the vault public key.'
+      };
+    }
+
+    // 4. Check against currently active authority identity
+    const currentVault = getEncryptedVault();
+    const isDifferentAuthority = !!(
+      currentVault && 
+      currentVault.fingerprint.toUpperCase() !== backup.encryptedVault.fingerprint.toUpperCase()
+    );
+
+    return {
+      success: true,
+      isDifferentAuthority,
+      activeFingerprint: currentVault?.fingerprint,
+      backupFingerprint: backup.encryptedVault.fingerprint,
+      backupPublicKeyHex: backup.encryptedVault.publicKeyHex,
+      recordCount: Array.isArray(backup.history) ? backup.history.length : 0,
+      decryptedPrivateKeyHex: secret.privateKeyHex
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err?.message || 'Failed to decrypt backup. Incorrect Master Password.'
+    };
+  }
+}
+
+/**
+ * Stage 3 of Backup Restore:
+ * Commits the verified backup to localStorage after all cryptographic checks and confirmations pass.
+ */
+export function commitRestoreBackup(backup: AlcoBackupPayload): { success: boolean; message: string } {
+  try {
+    saveEncryptedVault(backup.encryptedVault);
+
+    if (Array.isArray(backup.history)) {
+      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(backup.history));
+    }
+    if (backup.settings) {
+      localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(backup.settings));
+    }
+    if (Array.isArray(backup.customApps)) {
+      localStorage.setItem(STORAGE_KEYS.CUSTOM_APPS, JSON.stringify(backup.customApps));
+    }
+
+    return {
+      success: true,
+      message: 'Encrypted Vault and licensing records successfully restored.'
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Failed to commit backup to storage: ${err?.message || 'Storage error'}`
+    };
+  }
+}
+
+/**
+ * Legacy importVaultBackup wrapper for backwards compatibility
  */
 export function importVaultBackup(jsonString: string): { success: boolean; message: string; requiresUnlock?: boolean } {
-  try {
-    const backup = JSON.parse(jsonString);
-
-    // Check if it's the secure v2 encrypted vault
-    if (backup.alcoVaultVersion === '2.0-encrypted' && backup.encryptedVault) {
-      const v = backup.encryptedVault;
-      if (!v.ciphertextHex || !v.publicKeyHex || !v.saltHex || !v.ivHex) {
-        return { success: false, message: 'Invalid backup format: Malformed encrypted vault structure.' };
-      }
-
-      saveEncryptedVault(v);
-
-      if (Array.isArray(backup.history)) {
-        localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(backup.history));
-      }
-      if (backup.settings) {
-        localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(backup.settings));
-      }
-      if (Array.isArray(backup.customApps)) {
-        localStorage.setItem(STORAGE_KEYS.CUSTOM_APPS, JSON.stringify(backup.customApps));
-      }
-
-      return { 
-        success: true, 
-        message: 'Encrypted Vault successfully restored. Please unlock with your Master Password.',
-        requiresUnlock: true
-      };
-    }
-
-    // Support legacy v1 backup with warning
-    if (backup.alcoVaultVersion === '1.0' && backup.keyPair?.privateKeyHex) {
-      return { 
-        success: false, 
-        message: 'Legacy unencrypted backup detected. For security, please set up a master password in the Vault Setup first, then migrate your keys.' 
-      };
-    }
-
-    return { success: false, message: 'Unrecognized backup file format.' };
-  } catch (err: any) {
-    return { success: false, message: `Restore failed: ${err?.message || 'Unknown error'}` };
+  const validation = validateBackupFileFormat(jsonString);
+  if (!validation.valid || !validation.backup) {
+    return { success: false, message: validation.error || 'Invalid backup file' };
   }
+  return {
+    success: true,
+    message: 'Backup validated. Please proceed with password verification.',
+    requiresUnlock: true
+  };
 }

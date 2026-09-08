@@ -226,7 +226,6 @@ export default function App() {
           <SettingsView
             keyPair={keyPair}
             vaultStatus={vaultStatus}
-            inMemoryPrivateKey={inMemoryPrivateKey}
             onLockVault={handleLockVault}
             onRequestUnlock={(onSuccess) => handleRequestUnlock(onSuccess, 'Access Keypair Settings')}
             onRequestSetup={() => setIsSetupOpen(true)}

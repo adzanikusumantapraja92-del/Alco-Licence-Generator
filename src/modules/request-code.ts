@@ -3,13 +3,24 @@
  * 
  * Handles generation and decoding of customer activation request codes.
  * Format: ALCO-REQ-v1.<Base64UrlData>.<Checksum>
+ * 
+ * Cryptographic & Integrity Note:
+ * The 16-bit CRC checksum in this Request Code is strictly an integrity check
+ * to detect accidental copy-paste errors or network transmission corruption.
+ * It is NOT a cryptographic authentication or signature (no HMAC/secret key is used).
+ * Cryptographic authenticity and authorization are established exclusively when
+ * the Owner signs the resulting License Key using the Ed25519 Authority Private Key.
  */
 
 import { AlcoRequestCodePayload } from './types';
 import { isValidDeviceId } from './device-fingerprint';
+import { isStrictBase64Url } from './signing';
+
+export const MAX_REQUEST_CODE_LENGTH = 16384; // 16KB max input to prevent DoS
 
 /**
- * Simple 16-bit CRC checksum for copy-paste integrity verification
+ * 16-bit CRC checksum for transmission / copy-paste corruption detection.
+ * NOTE: Detects corruption only, NOT cryptographic authentication.
  */
 function calculateChecksum(str: string): string {
   let crc = 0xFFFF;
@@ -42,10 +53,15 @@ function toBase64Url(str: string): string {
 }
 
 /**
- * Safe base64url decoding
+ * Safe base64url decoding with strict character set validation
  */
 function fromBase64Url(base64url: string): string {
-  let base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  const trimmed = base64url.trim();
+  if (!isStrictBase64Url(trimmed)) {
+    throw new Error('Base64URL contains illegal characters');
+  }
+
+  let base64 = trimmed.replace(/-/g, '+').replace(/_/g, '/');
   while (base64.length % 4 !== 0) {
     base64 += '=';
   }
@@ -61,15 +77,19 @@ function fromBase64Url(base64url: string): string {
  * Encodes a customer request into a standardized Request Code string
  */
 export function encodeRequestCode(payload: AlcoRequestCodePayload): string {
+  if (!isValidDeviceId(payload.deviceId)) {
+    throw new Error(`Cannot encode Request Code: invalid hardware device ID format "${payload.deviceId}"`);
+  }
+
   const json = JSON.stringify({
     v: payload.version,
-    app: payload.appId,
-    dev: payload.deviceId,
-    cust: payload.customerId,
-    name: payload.customerName || '',
-    req: payload.requestId,
+    app: payload.appId.trim(),
+    dev: payload.deviceId.trim(),
+    cust: payload.customerId.trim(),
+    name: payload.customerName?.trim() || '',
+    req: payload.requestId.trim(),
     ts: payload.timestamp,
-    notes: payload.notes || ''
+    notes: payload.notes?.trim() || ''
   });
 
   const b64 = toBase64Url(json);
@@ -92,30 +112,43 @@ export function decodeRequestCode(rawInput: string): RequestDecodeResult {
     return { success: false, error: 'Request code cannot be empty' };
   }
 
+  if (trimmed.length > MAX_REQUEST_CODE_LENGTH) {
+    return { 
+      success: false, 
+      error: `Request code exceeds maximum size limit of ${MAX_REQUEST_CODE_LENGTH} characters` 
+    };
+  }
+
   // Check prefix
   if (!trimmed.startsWith('ALCO-REQ-v1.')) {
-    // Attempt relaxed parse if owner pasted raw JSON
+    // Attempt relaxed parse if owner pasted raw JSON for convenience
     try {
       if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
         const parsed = JSON.parse(trimmed);
         if (parsed.appId && parsed.deviceId && parsed.customerId) {
+          if (!isValidDeviceId(parsed.deviceId)) {
+            return {
+              success: false,
+              error: `Invalid hardware device ID format "${parsed.deviceId}". Expected format "ALCO-DEV-XXXX-XXXX-XXXX"`
+            };
+          }
           return {
             success: true,
             data: {
               version: '1.0',
-              appId: parsed.appId,
-              deviceId: parsed.deviceId,
-              customerId: parsed.customerId,
-              customerName: parsed.customerName || '',
-              requestId: parsed.requestId || `REQ-${Date.now().toString(36).toUpperCase()}`,
-              timestamp: parsed.timestamp || new Date().toISOString(),
-              notes: parsed.notes || ''
+              appId: String(parsed.appId).trim(),
+              deviceId: String(parsed.deviceId).trim(),
+              customerId: String(parsed.customerId).trim(),
+              customerName: parsed.customerName ? String(parsed.customerName).trim() : '',
+              requestId: parsed.requestId ? String(parsed.requestId).trim() : `REQ-${Date.now().toString(36).toUpperCase()}`,
+              timestamp: parsed.timestamp ? String(parsed.timestamp).trim() : new Date().toISOString(),
+              notes: parsed.notes ? String(parsed.notes).trim() : ''
             }
           };
         }
       }
     } catch {
-      // ignore
+      // ignore JSON parse fallback error
     }
     return { 
       success: false, 
@@ -125,17 +158,17 @@ export function decodeRequestCode(rawInput: string): RequestDecodeResult {
 
   const parts = trimmed.split('.');
   if (parts.length !== 3) {
-    return { success: false, error: 'Malformed request code structure' };
+    return { success: false, error: 'Malformed request code structure: expected exactly 3 dot-separated segments' };
   }
 
   const [, b64Data, checksum] = parts;
 
-  // Verify checksum
+  // Verify transmission corruption checksum
   const expectedChk = calculateChecksum(b64Data);
   if (checksum.toUpperCase() !== expectedChk.toUpperCase()) {
     return { 
       success: false, 
-      error: `Integrity check failed: checksum mismatch (expected ${expectedChk}, got ${checksum})` 
+      error: `Data corruption detected: checksum mismatch (expected ${expectedChk}, got ${checksum}). The request code may have been truncated or altered during copy-paste.` 
     };
   }
 
@@ -144,10 +177,23 @@ export function decodeRequestCode(rawInput: string): RequestDecodeResult {
     const jsonStr = fromBase64Url(b64Data);
     const parsed = JSON.parse(jsonStr);
 
+    if (!parsed || typeof parsed !== 'object') {
+      return { success: false, error: 'Malformed request data: decoded payload is not a JSON object' };
+    }
+
     if (!parsed.app || !parsed.dev || !parsed.cust) {
       return { 
         success: false, 
-        error: 'Incomplete request code payload (missing appId, deviceId, or customerId)' 
+        error: 'Incomplete request code payload: missing required fields (appId, deviceId, or customerId)' 
+      };
+    }
+
+    // Strict Device ID Validation
+    const devId = String(parsed.dev).trim();
+    if (!isValidDeviceId(devId)) {
+      return {
+        success: false,
+        error: `Invalid hardware device ID format in request code: "${devId}". Expected "ALCO-DEV-XXXX-XXXX-XXXX"`
       };
     }
 
@@ -155,13 +201,13 @@ export function decodeRequestCode(rawInput: string): RequestDecodeResult {
       success: true,
       data: {
         version: parsed.v || '1.0',
-        appId: parsed.app,
-        deviceId: parsed.dev,
-        customerId: parsed.cust,
-        customerName: parsed.name || '',
-        requestId: parsed.req || `REQ-${Date.now().toString(36).toUpperCase()}`,
-        timestamp: parsed.ts || new Date().toISOString(),
-        notes: parsed.notes || ''
+        appId: String(parsed.app).trim(),
+        deviceId: devId,
+        customerId: String(parsed.cust).trim(),
+        customerName: parsed.name ? String(parsed.name).trim() : '',
+        requestId: parsed.req ? String(parsed.req).trim() : `REQ-${Date.now().toString(36).toUpperCase()}`,
+        timestamp: parsed.ts ? String(parsed.ts).trim() : new Date().toISOString(),
+        notes: parsed.notes ? String(parsed.notes).trim() : ''
       }
     };
   } catch (err: any) {

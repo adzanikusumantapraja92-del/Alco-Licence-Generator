@@ -7,24 +7,27 @@ import {
   Check, 
   Download, 
   RotateCw, 
-  Eye, 
-  EyeOff, 
   FileCode, 
   Lock, 
   Unlock, 
   AlertTriangle, 
-  Cpu, 
   Key, 
   ShieldCheck, 
-  RefreshCw 
+  RefreshCw,
+  UploadCloud,
+  FileCheck
 } from 'lucide-react';
-import { OwnerKeyPair, VaultStatus, EncryptedOwnerVault } from '../modules/types';
+import { OwnerKeyPair, VaultStatus } from '../modules/types';
 import { 
   exportVaultBackup, 
-  importVaultBackup, 
   getEncryptedVault, 
   changeVaultMasterPassword, 
-  rotateOwnerKeyPair 
+  rotateOwnerKeyPair,
+  validateBackupFileFormat,
+  verifyBackupDecryption,
+  commitRestoreBackup,
+  AlcoBackupPayload,
+  BackupVerificationResult
 } from '../modules/storage';
 import { CLIENT_VERIFICATION_SNIPPET } from '../modules/verification';
 import { ELECTRON_DEVICE_FINGERPRINT_SNIPPET } from '../modules/device-fingerprint';
@@ -32,7 +35,6 @@ import { ELECTRON_DEVICE_FINGERPRINT_SNIPPET } from '../modules/device-fingerpri
 interface SettingsViewProps {
   keyPair: OwnerKeyPair | null;
   vaultStatus: VaultStatus;
-  inMemoryPrivateKey: string | null;
   onLockVault: () => void;
   onRequestUnlock: (onUnlocked: (privateKey: string) => void) => void;
   onRequestSetup: () => void;
@@ -42,13 +44,11 @@ interface SettingsViewProps {
 export const SettingsView: React.FC<SettingsViewProps> = ({
   keyPair,
   vaultStatus,
-  inMemoryPrivateKey,
   onLockVault,
   onRequestUnlock,
   onRequestSetup,
   onRefreshData
 }) => {
-  const [showTransientPrivateKey, setShowTransientPrivateKey] = useState<boolean>(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   
   // Change Password Form State
@@ -59,9 +59,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [passwordChangeStatus, setPasswordChangeStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [isChangingPassword, setIsChangingPassword] = useState<boolean>(false);
 
-  // Backup & Restore State
+  // Hardened Backup & Restore State Machine
   const [importJson, setImportJson] = useState<string>('');
-  const [importStatus, setImportStatus] = useState<{ success: boolean; message: string } | null>(null);
+  const [restoreStep, setRestoreStep] = useState<'idle' | 'password_prompt' | 'authority_warning' | 'success'>('idle');
+  const [validatedBackup, setValidatedBackup] = useState<AlcoBackupPayload | null>(null);
+  const [restorePassword, setRestorePassword] = useState<string>('');
+  const [isVerifyingBackup, setIsVerifyingBackup] = useState<boolean>(false);
+  const [verificationResult, setVerificationResult] = useState<BackupVerificationResult | null>(null);
+  const [authorityAcknowledged, setAuthorityAcknowledged] = useState<boolean>(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreSuccessMessage, setRestoreSuccessMessage] = useState<string | null>(null);
   
   // Rotate Key State
   const [showRotateConfirm, setShowRotateConfirm] = useState<boolean>(false);
@@ -121,14 +128,86 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const handleImportBackup = () => {
-    if (!importJson.trim()) return;
-    const res = importVaultBackup(importJson);
-    setImportStatus(res);
-    if (res.success) {
-      onRefreshData();
-      setImportJson('');
+  // Stage 1: Validate Backup Format
+  const handleValidateBackup = () => {
+    setRestoreError(null);
+    setRestoreSuccessMessage(null);
+    setVerificationResult(null);
+
+    if (!importJson.trim()) {
+      setRestoreError('Please paste backup JSON content first.');
+      return;
     }
+
+    const validation = validateBackupFileFormat(importJson);
+    if (!validation.valid || !validation.backup) {
+      setRestoreError(validation.error || 'Invalid backup structure.');
+      return;
+    }
+
+    setValidatedBackup(validation.backup);
+    setRestoreStep('password_prompt');
+  };
+
+  // Stage 2: Decrypt with Backup Master Password & Verify Keypair
+  const handleDecryptAndVerifyBackup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validatedBackup) return;
+
+    if (!restorePassword) {
+      setRestoreError('Please enter the Master Password for this backup.');
+      return;
+    }
+
+    setIsVerifyingBackup(true);
+    setRestoreError(null);
+
+    try {
+      const res = await verifyBackupDecryption(validatedBackup, restorePassword);
+      if (!res.success) {
+        setRestoreError(res.error || 'Failed to decrypt backup.');
+        return;
+      }
+
+      setVerificationResult(res);
+
+      if (res.isDifferentAuthority) {
+        setRestoreStep('authority_warning');
+      } else {
+        // Same authority: ready to commit
+        handleCommitRestore(validatedBackup);
+      }
+    } catch (err: any) {
+      setRestoreError(err?.message || 'Decryption failed.');
+    } finally {
+      setIsVerifyingBackup(false);
+    }
+  };
+
+  // Stage 3: Commit Restore
+  const handleCommitRestore = (backupToRestore: AlcoBackupPayload) => {
+    setRestoreError(null);
+    const res = commitRestoreBackup(backupToRestore);
+    if (res.success) {
+      setRestoreSuccessMessage(res.message);
+      setRestoreStep('success');
+      setImportJson('');
+      setRestorePassword('');
+      setAuthorityAcknowledged(false);
+      onLockVault();
+      onRefreshData();
+    } else {
+      setRestoreError(res.message);
+    }
+  };
+
+  const handleResetRestore = () => {
+    setRestoreStep('idle');
+    setValidatedBackup(null);
+    setRestorePassword('');
+    setVerificationResult(null);
+    setAuthorityAcknowledged(false);
+    setRestoreError(null);
   };
 
   const handleExecuteKeyRotation = async (e: React.FormEvent) => {
@@ -150,48 +229,56 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8 space-y-8">
+    <div className="max-w-6xl mx-auto px-4 py-8 space-y-8 animate-fadeIn">
       {/* Header */}
-      <div>
-        <h2 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
-          <Settings className="w-5 h-5 text-indigo-400" />
-          <span>Security Vault & Client SDK Integration</span>
-        </h2>
-        <p className="text-sm text-slate-400 mt-1">
-          Cryptographic authority key protection, AES-256-GCM vault lifecycle, and ALCO client Electron integration.
-        </p>
-      </div>
-
-      {/* Mandatory Warning Banner */}
-      <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-3 shadow-sm">
-        <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-        <div className="space-y-1">
-          <span className="font-bold text-amber-300 uppercase tracking-wider text-[11px] block">
-            Peringatan Keamanan Kritis Otoritas ALCO
-          </span>
-          <p className="leading-relaxed text-slate-200 font-medium text-xs">
-            "Jika private key dan backup hilang, lisensi baru tidak dapat ditandatangani menggunakan identitas ALCO lama."
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-800 pb-5">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2.5">
+            <Settings className="w-6 h-6 text-indigo-400" />
+            <span>ALCO Authority Security &amp; Settings</span>
+          </h2>
+          <p className="text-sm text-slate-400 mt-1">
+            Manage your hardware-bound offline Ed25519 Authority Keypair, AES-256-GCM Vault, and Client SDK.
           </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {vaultStatus === 'unlocked' ? (
+            <button
+              onClick={onLockVault}
+              className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-rose-950/80 hover:bg-rose-900 text-rose-200 border border-rose-800/80 flex items-center gap-2 transition shadow-sm"
+            >
+              <Lock className="w-3.5 h-3.5 text-rose-400" />
+              <span>Lock Vault Now</span>
+            </button>
+          ) : vaultStatus === 'locked' ? (
+            <button
+              onClick={() => onRequestUnlock(() => {})}
+              className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center gap-2 transition shadow-sm"
+            >
+              <Unlock className="w-3.5 h-3.5" />
+              <span>Unlock Vault</span>
+            </button>
+          ) : null}
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* Left Column: Vault Status, Key Details, Password Management */}
+        {/* Left Column: Owner Keypair & Vault Security */}
         <div className="lg:col-span-6 space-y-6">
 
-          {/* Vault Security Status Card */}
+          {/* Keypair Card */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-sm space-y-5">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-indigo-400" />
+                <KeyRound className="w-4 h-4 text-indigo-400" />
                 <h3 className="text-sm font-bold uppercase tracking-wider text-white">
-                  Owner Vault Status
+                  Ed25519 Authority Identity
                 </h3>
               </div>
-              
               {vaultStatus === 'uninitialized' && (
                 <span className="px-2.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                  NOT INITIALIZED
+                  NOT CONFIGURED
                 </span>
               )}
               {vaultStatus === 'locked' && (
@@ -202,7 +289,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {vaultStatus === 'unlocked' && (
                 <span className="px-2.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  UNLOCKED IN MEMORY
+                  UNLOCKED IN VOLATILE RAM
                 </span>
               )}
             </div>
@@ -212,7 +299,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <span className="text-slate-400">Local Storage Security:</span>
                 <span className="text-emerald-400 font-mono font-medium flex items-center gap-1">
                   <Check className="w-3.5 h-3.5" />
-                  No Plaintext Private Key Stored
+                  Zero Plaintext Keys in Storage
                 </span>
               </div>
 
@@ -225,6 +312,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <span className="text-slate-400">PBKDF2 Iterations:</span>
                 <span className="text-slate-200 font-mono">250,000 passes</span>
               </div>
+
+              {keyPair?.createdAt && (
+                <div className="flex items-center justify-between p-3 rounded-lg bg-slate-950 border border-slate-850">
+                  <span className="text-slate-400">Authority Created:</span>
+                  <span className="text-slate-300 font-mono">{new Date(keyPair.createdAt).toLocaleDateString()}</span>
+                </div>
+              )}
 
               {vault?.vaultHint && (
                 <div className="p-3 rounded-lg bg-slate-950 border border-slate-850 text-slate-400">
@@ -252,42 +346,42 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   className="w-full py-2.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center gap-1.5 transition shadow"
                 >
                   <Unlock className="w-3.5 h-3.5" />
-                  <span>Unlock Vault with Master Password</span>
+                  <span>Unlock with Master Password</span>
                 </button>
               )}
 
               {vaultStatus === 'unlocked' && (
                 <button
                   onClick={onLockVault}
-                  className="w-full py-2.5 rounded-lg text-xs font-semibold bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 border border-rose-900/50 flex items-center justify-center gap-1.5 transition"
+                  className="w-full py-2 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-750 text-slate-300 flex items-center justify-center gap-1.5 transition"
                 >
                   <Lock className="w-3.5 h-3.5" />
-                  <span>Lock Vault (Purge Decrypted Key From Memory)</span>
+                  <span>Purge Volatile Memory &amp; Lock</span>
                 </button>
               )}
             </div>
-          </div>
 
-          {/* Cryptographic Key Pair Inspection */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-sm space-y-5">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-indigo-400" />
-                <h3 className="text-sm font-bold uppercase tracking-wider text-white">
-                  Ed25519 Authority Key
-                </h3>
+            {/* Authority Fingerprint */}
+            {keyPair && (
+              <div className="space-y-1.5 pt-2 border-t border-slate-850">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium text-slate-400">
+                    Public Key Fingerprint:
+                  </label>
+                  <span className="text-[11px] font-mono text-indigo-400 bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-850">
+                    {keyPair.fingerprint}
+                  </span>
+                </div>
               </div>
-              <span className="text-xs text-slate-500 font-mono">
-                {keyPair?.fingerprint || 'NOT READY'}
-              </span>
-            </div>
+            )}
 
-            {/* Public Key (Safe to embed) */}
-            <div className="space-y-1.5">
+            {/* Public Key Display (Safe for embedding) */}
+            <div className="space-y-2 pt-2 border-t border-slate-850">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                  <span>Public Key (Client Safe)</span>
-                  <span className="px-1.5 py-0.2 rounded text-[9px] bg-slate-800 text-slate-400 font-mono">32 bytes</span>
+                <label className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Ed25519 Public Key</span>
+                  <span className="px-1.5 py-0.2 rounded text-[9px] bg-slate-800 text-slate-400 font-mono">32 bytes / 64 hex</span>
                 </label>
                 {keyPair && (
                   <button
@@ -307,46 +401,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 className="w-full p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-indigo-300 text-xs font-mono break-all focus:outline-none"
               />
               <p className="text-[11px] text-slate-400">
-                ✓ <strong>Public Key:</strong> Safely embedded into customer ALCO desktop apps. Used strictly for verifying signatures.
+                ✓ <strong>Public Key:</strong> Safely embedded into customer ALCO desktop apps. Used strictly for verifying digital signatures.
               </p>
             </div>
 
-            {/* Private Key Status */}
+            {/* Private Key Status (HARDENED: Zero Private Key Inspection, Zero DOM Exposure) */}
             <div className="space-y-2 pt-2 border-t border-slate-850">
-              <div className="flex items-center justify-between">
-                <label className="text-xs font-semibold text-rose-300 flex items-center gap-1.5">
-                  <Lock className="w-3.5 h-3.5 text-rose-400" />
-                  <span>Private Signing Key Status</span>
-                </label>
-                {inMemoryPrivateKey && (
-                  <button
-                    onClick={() => setShowTransientPrivateKey(!showTransientPrivateKey)}
-                    className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
-                  >
-                    {showTransientPrivateKey ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                    <span>{showTransientPrivateKey ? 'Hide' : 'Inspect in Memory'}</span>
-                  </button>
-                )}
-              </div>
+              <label className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5 text-rose-400" />
+                <span>Private Signing Key Security</span>
+              </label>
 
               {vaultStatus === 'locked' ? (
                 <div className="p-3 rounded-lg bg-slate-950 border border-rose-950/80 text-xs text-slate-400 flex items-center gap-2">
                   <Lock className="w-4 h-4 text-rose-400 shrink-0" />
                   <span>
-                    Private key is currently encrypted in AES-256-GCM storage. Unlock with Master Password to access in volatile memory.
+                    Private key is currently encrypted in AES-256-GCM storage. Unlock with Master Password to enable license signing.
                   </span>
                 </div>
-              ) : inMemoryPrivateKey ? (
-                <div className="space-y-1.5">
-                  <textarea
-                    readOnly
-                    rows={2}
-                    value={showTransientPrivateKey ? inMemoryPrivateKey : '••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••'}
-                    className="w-full p-2.5 rounded-lg bg-slate-950 border border-rose-950/80 text-rose-300 text-xs font-mono break-all focus:outline-none"
-                  />
-                  <div className="p-2.5 rounded bg-rose-950/30 border border-rose-900/40 text-[11px] text-rose-300/90 leading-relaxed">
-                    ⚠️ <strong>TRANSIENT IN-MEMORY ONLY:</strong> This key is only held in volatile session memory while unlocked. It is never logged and never saved plaintext to browser storage.
+              ) : vaultStatus === 'unlocked' ? (
+                <div className="p-3 rounded-lg bg-emerald-950/30 border border-emerald-900/40 text-xs text-emerald-300 space-y-1">
+                  <div className="flex items-center gap-1.5 font-medium">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Active in Transient Execution Memory</span>
                   </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    The Ed25519 signing key is held strictly in volatile RAM for authorized signing operations. In compliance with ALCO security hardening, private keys are never exposed in the UI, never placed in the DOM, and never stored in plaintext.
+                  </p>
                 </div>
               ) : (
                 <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-500">
@@ -358,77 +439,76 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             {/* Explicit Key Rotation */}
             <div className="pt-3 border-t border-slate-850">
               {!showRotateConfirm ? (
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-slate-400">Need to rotate authority keys?</span>
-                  <button
-                    onClick={() => setShowRotateConfirm(true)}
-                    className="px-3 py-1.5 rounded text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 border border-rose-900/50 transition flex items-center gap-1.5"
-                  >
-                    <RotateCw className="w-3 h-3" />
-                    <span>Rotate Key Pair</span>
-                  </button>
-                </div>
+                <button
+                  onClick={() => setShowRotateConfirm(true)}
+                  disabled={vaultStatus !== 'unlocked'}
+                  className="w-full py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-amber-300 hover:bg-amber-950/20 border border-slate-800 hover:border-amber-800/40 flex items-center justify-center gap-1.5 transition disabled:opacity-40"
+                >
+                  <RotateCw className="w-3.5 h-3.5" />
+                  <span>Rotate Owner Key Pair...</span>
+                </button>
               ) : (
-                <form onSubmit={handleExecuteKeyRotation} className="space-y-3 p-3 rounded-lg bg-rose-950/20 border border-rose-900/40">
-                  <div className="text-xs text-rose-300 font-semibold flex items-center gap-1.5">
-                    <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-                    <span>High Risk Operation: Rotate Authority Key Pair</span>
+                <form onSubmit={handleExecuteKeyRotation} className="p-3.5 rounded-lg bg-amber-950/20 border border-amber-900/60 space-y-3">
+                  <div className="flex items-center gap-2 text-amber-300 text-xs font-semibold">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                    <span>Warning: Key Rotation is Irreversible</span>
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    This will permanently replace your Ed25519 identity. Licenses signed with the new key will NOT be recognized by existing client apps unless their embedded public key is updated.
+                    Rotating generates a fresh Ed25519 keypair. All customer apps must be updated with the new Public Key to verify newly issued licenses!
                   </p>
                   <div>
-                    <label className="text-[11px] text-slate-300 block mb-1">
-                      Enter Current Master Password to Confirm:
+                    <label className="text-[11px] text-slate-400 block mb-1">
+                      Confirm with Master Password:
                     </label>
                     <input
                       type="password"
                       required
                       value={rotatePassword}
                       onChange={(e) => setRotatePassword(e.target.value)}
-                      placeholder="Master Password..."
-                      className="w-full px-3 py-1.5 rounded bg-slate-950 border border-slate-800 text-xs font-mono text-white focus:outline-none"
+                      placeholder="Enter Master Password..."
+                      className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
                     />
                   </div>
-
-                  {rotateStatus && (
-                    <div className={`p-2 rounded text-xs ${rotateStatus.success ? 'bg-emerald-950/40 text-emerald-300' : 'bg-rose-950/40 text-rose-300'}`}>
-                      {rotateStatus.message}
-                    </div>
-                  )}
-
                   <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowRotateConfirm(false)}
-                      className="px-3 py-1 rounded text-xs text-slate-400 hover:text-white bg-slate-800"
-                    >
-                      Cancel
-                    </button>
                     <button
                       type="submit"
                       disabled={isRotating || !rotatePassword}
-                      className="px-3 py-1 rounded text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-50"
+                      className="flex-1 py-1.5 rounded text-xs font-semibold bg-amber-600 hover:bg-amber-500 text-white disabled:opacity-50 transition"
                     >
                       {isRotating ? 'Rotating...' : 'Confirm Key Rotation'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowRotateConfirm(false)}
+                      className="px-3 py-1.5 rounded text-xs text-slate-400 hover:text-white bg-slate-900"
+                    >
+                      Cancel
                     </button>
                   </div>
                 </form>
               )}
+
+              {rotateStatus && (
+                <div className={`p-2.5 rounded text-xs mt-3 ${
+                  rotateStatus.success ? 'bg-emerald-950/40 text-emerald-300 border border-emerald-800' : 'bg-rose-950/40 text-rose-300 border border-rose-800'
+                }`}>
+                  {rotateStatus.message}
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Change Master Password Form */}
+          {/* Change Master Password Card */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-sm space-y-4">
             <h3 className="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
               <Key className="w-4 h-4 text-indigo-400" />
               <span>Change Master Password</span>
             </h3>
             <p className="text-xs text-slate-400">
-              Re-encrypts the private key with a new Master Password, generating fresh cryptographic salt and IV.
+              Re-encrypts the vault with a new Master Password using fresh PBKDF2 salt and AES-GCM IV.
             </p>
 
-            <form onSubmit={handleChangeMasterPassword} className="space-y-3">
+            <form onSubmit={handleChangeMasterPassword} className="space-y-3 pt-1">
               <div>
                 <label className="text-xs font-medium text-slate-300 block mb-1">
                   Current Master Password
@@ -438,25 +518,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   required
                   value={currentPassword}
                   onChange={(e) => setCurrentPassword(e.target.value)}
-                  placeholder="Enter current password..."
-                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  placeholder="••••••••••••"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
                 />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-medium text-slate-300 block mb-1">
-                    New Password (min 8 chars)
+                    New Master Password
                   </label>
                   <input
                     type="password"
                     required
+                    minLength={8}
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="New password..."
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    placeholder="Min 8 characters"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
+
                 <div>
                   <label className="text-xs font-medium text-slate-300 block mb-1">
                     Confirm New Password
@@ -466,22 +548,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     required
                     value={confirmNewPassword}
                     onChange={(e) => setConfirmNewPassword(e.target.value)}
-                    placeholder="Confirm new password..."
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    placeholder="Repeat new password"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
               </div>
 
               <div>
                 <label className="text-xs font-medium text-slate-300 block mb-1">
-                  New Password Hint (Optional)
+                  Optional Password Hint
                 </label>
                 <input
                   type="text"
                   value={passwordHint}
                   onChange={(e) => setPasswordHint(e.target.value)}
-                  placeholder="e.g. Work phrase and favorite year"
-                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  placeholder="e.g. My primary studio master key"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
                 />
               </div>
 
@@ -495,8 +577,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <button
                 type="submit"
-                disabled={isChangingPassword || !currentPassword || !newPassword || !confirmNewPassword}
-                className="px-4 py-2 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition shadow"
+                disabled={isChangingPassword || !currentPassword || !newPassword}
+                className="w-full py-2.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 disabled:opacity-50 transition"
               >
                 {isChangingPassword ? 'Re-encrypting Vault...' : 'Update Master Password'}
               </button>
@@ -507,15 +589,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         {/* Right Column: Encrypted Vault Backup & ALCO Client SDK Code */}
         <div className="lg:col-span-6 space-y-6">
 
-          {/* Encrypted Vault Backup & Restore */}
+          {/* Hardened Encrypted Vault Backup & Multi-Stage Restore */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-sm space-y-4">
             <h3 className="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
               <Download className="w-4 h-4 text-indigo-400" />
-              <span>Encrypted Vault Backup & Restore</span>
+              <span>Encrypted Vault Backup &amp; Hardened Restore</span>
             </h3>
             <p className="text-xs text-slate-400 leading-relaxed">
               Export your entire database (AES-256-GCM encrypted vault, history, apps registry, and preferences). 
-              <strong className="text-slate-300 ml-1">The backup contains zero plaintext private keys</strong> and requires your Master Password to decrypt.
+              <strong className="text-slate-300 ml-1">Zero plaintext private keys are ever exported</strong>. Restoring requires Master Password verification and keypair identity derivation checks.
             </p>
 
             <div>
@@ -528,30 +610,158 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </button>
             </div>
 
-            <div className="pt-3 border-t border-slate-850 space-y-2">
-              <label className="text-xs font-medium text-slate-300 block">
-                Restore Encrypted Backup JSON:
-              </label>
-              <textarea
-                rows={3}
-                value={importJson}
-                onChange={(e) => setImportJson(e.target.value)}
-                placeholder="Paste encrypted backup JSON content here to restore..."
-                className="w-full p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-slate-300"
-              />
-              <button
-                onClick={handleImportBackup}
-                disabled={!importJson.trim()}
-                className="px-3.5 py-1.5 rounded text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 disabled:opacity-50 transition"
-              >
-                Restore Encrypted Vault
-              </button>
+            {/* Hardened Restore Workflow */}
+            <div className="pt-3 border-t border-slate-850 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-slate-300 block">
+                  Hardened Backup Restore Pipeline:
+                </label>
+                {restoreStep !== 'idle' && (
+                  <button 
+                    onClick={handleResetRestore}
+                    className="text-[11px] text-slate-400 hover:text-white"
+                  >
+                    Cancel / Reset
+                  </button>
+                )}
+              </div>
 
-              {importStatus && (
-                <div className={`p-2.5 rounded text-xs mt-2 ${
-                  importStatus.success ? 'bg-emerald-950/40 text-emerald-300 border border-emerald-800' : 'bg-rose-950/40 text-rose-300 border border-rose-800'
-                }`}>
-                  {importStatus.message}
+              {/* Step 1: Input JSON */}
+              {restoreStep === 'idle' && (
+                <div className="space-y-2">
+                  <textarea
+                    rows={3}
+                    value={importJson}
+                    onChange={(e) => setImportJson(e.target.value)}
+                    placeholder="Paste encrypted backup JSON content here to begin restore pipeline..."
+                    className="w-full p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-slate-300"
+                  />
+                  <button
+                    onClick={handleValidateBackup}
+                    disabled={!importJson.trim()}
+                    className="px-4 py-2 rounded text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition flex items-center gap-1.5"
+                  >
+                    <FileCheck className="w-3.5 h-3.5" />
+                    <span>Verify Backup Structure</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Step 2: Password Prompt & Keypair Derivation Check */}
+              {restoreStep === 'password_prompt' && validatedBackup && (
+                <form onSubmit={handleDecryptAndVerifyBackup} className="p-3.5 rounded-lg bg-slate-950 border border-indigo-900/60 space-y-3 animate-fadeIn">
+                  <div className="flex items-center gap-2 text-indigo-300 text-xs font-semibold">
+                    <Key className="w-4 h-4 text-indigo-400" />
+                    <span>Step 2: Enter Master Password for Backup</span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 space-y-1 bg-slate-900 p-2.5 rounded border border-slate-800">
+                    <p>✓ Structure Validated: <span className="text-slate-200">v2.0-encrypted</span></p>
+                    <p>✓ Export Date: <span className="text-slate-200">{new Date(validatedBackup.exportDate).toLocaleString()}</span></p>
+                    <p>✓ Target Public Key: <span className="font-mono text-indigo-300">{validatedBackup.encryptedVault.fingerprint}</span></p>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">
+                      Master Password of this Backup:
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={restorePassword}
+                      onChange={(e) => setRestorePassword(e.target.value)}
+                      placeholder="Enter backup master password..."
+                      className="w-full px-3 py-2 rounded bg-slate-900 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="submit"
+                      disabled={isVerifyingBackup || !restorePassword}
+                      className="flex-1 py-2 rounded text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition flex items-center justify-center gap-1.5"
+                    >
+                      {isVerifyingBackup ? (
+                        <>
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          <span>Decrypting &amp; Verifying Keypair...</span>
+                        </>
+                      ) : (
+                        <span>Decrypt &amp; Verify Identity</span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetRestore}
+                      className="px-3 py-2 rounded text-xs text-slate-400 hover:text-white bg-slate-900"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* Step 3: Blocking Warning on Authority Identity Mismatch */}
+              {restoreStep === 'authority_warning' && verificationResult && validatedBackup && (
+                <div className="p-4 rounded-lg bg-rose-950/30 border border-rose-900/80 space-y-3 animate-fadeIn">
+                  <div className="flex items-center gap-2 text-rose-300 text-xs font-bold uppercase tracking-wider">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span>Blocking Warning: Authority Identity Mismatch</span>
+                  </div>
+
+                  <p className="text-xs text-rose-200 leading-relaxed font-medium">
+                    This backup belongs to a different ALCO License Authority.
+                    Restoring it will change the signing identity and existing ALCO applications may reject newly generated licenses!
+                  </p>
+
+                  <div className="space-y-1.5 text-[11px] bg-slate-950 p-2.5 rounded border border-rose-950 font-mono">
+                    <div className="text-slate-400">Current Active Fingerprint: <span className="text-emerald-400">{verificationResult.activeFingerprint || 'None'}</span></div>
+                    <div className="text-slate-400">Backup Authority Fingerprint: <span className="text-amber-400">{verificationResult.backupFingerprint}</span></div>
+                    <div className="text-slate-400">Records to restore: <span className="text-slate-200">{verificationResult.recordCount}</span></div>
+                  </div>
+
+                  <label className="flex items-start gap-2 pt-1 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={authorityAcknowledged}
+                      onChange={(e) => setAuthorityAcknowledged(e.target.checked)}
+                      className="mt-0.5 rounded bg-slate-900 border-slate-700 text-rose-600 focus:ring-rose-500"
+                    />
+                    <span className="text-xs text-slate-300 leading-normal">
+                      I understand that restoring this backup changes the active signing authority and replaces the existing cryptographic keypair.
+                    </span>
+                  </label>
+
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      disabled={!authorityAcknowledged}
+                      onClick={() => handleCommitRestore(validatedBackup)}
+                      className="flex-1 py-2 rounded text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-40 transition shadow"
+                    >
+                      Confirm Restore &amp; Replace Authority
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetRestore}
+                      className="px-3 py-2 rounded text-xs text-slate-400 hover:text-white bg-slate-900"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Error Box */}
+              {restoreError && (
+                <div className="p-3 rounded text-xs bg-rose-950/50 text-rose-300 border border-rose-800 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                  <span>{restoreError}</span>
+                </div>
+              )}
+
+              {/* Success Box */}
+              {restoreSuccessMessage && (
+                <div className="p-3 rounded text-xs bg-emerald-950/50 text-emerald-300 border border-emerald-800 flex items-center gap-2">
+                  <Check className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <span>{restoreSuccessMessage}</span>
                 </div>
               )}
             </div>
