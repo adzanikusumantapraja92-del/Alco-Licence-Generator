@@ -26,8 +26,10 @@ import {
   validateBackupFileFormat,
   verifyBackupDecryption,
   commitRestoreBackup,
+  cancelStagedRestore,
   AlcoBackupPayload,
-  BackupVerificationResult
+  BackupVerificationResult,
+  BackupVerificationProof
 } from '../modules/storage';
 import { CLIENT_VERIFICATION_SNIPPET } from '../modules/verification';
 import { ELECTRON_DEVICE_FINGERPRINT_SNIPPET } from '../modules/device-fingerprint';
@@ -173,9 +175,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       if (res.isDifferentAuthority) {
         setRestoreStep('authority_warning');
+      } else if (res.proof) {
+        // Same authority: ready to commit with cryptographic proof
+        handleCommitRestore(res.proof);
       } else {
-        // Same authority: ready to commit
-        handleCommitRestore(validatedBackup);
+        setRestoreError('Missing verification proof.');
       }
     } catch (err: any) {
       setRestoreError(err?.message || 'Decryption failed.');
@@ -185,9 +189,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   // Stage 3: Commit Restore
-  const handleCommitRestore = (backupToRestore: AlcoBackupPayload) => {
+  const handleCommitRestore = (proof: BackupVerificationProof) => {
     setRestoreError(null);
-    const res = commitRestoreBackup(backupToRestore);
+    const res = commitRestoreBackup(proof);
     if (res.success) {
       setRestoreSuccessMessage(res.message);
       setRestoreStep('success');
@@ -202,6 +206,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleResetRestore = () => {
+    cancelStagedRestore();
     setRestoreStep('idle');
     setValidatedBackup(null);
     setRestorePassword('');
@@ -732,8 +737,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <div className="flex gap-2 pt-1">
                     <button
                       type="button"
-                      disabled={!authorityAcknowledged}
-                      onClick={() => handleCommitRestore(validatedBackup)}
+                      disabled={!authorityAcknowledged || !verificationResult?.proof}
+                      onClick={() => verificationResult?.proof && handleCommitRestore(verificationResult.proof)}
                       className="flex-1 py-2 rounded text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-40 transition shadow"
                     >
                       Confirm Restore &amp; Replace Authority

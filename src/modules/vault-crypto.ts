@@ -23,14 +23,25 @@ export interface EncryptedVaultData {
   kdf: 'PBKDF2-SHA-256';
 }
 
+function getCrypto(): Crypto {
+  if (typeof window !== 'undefined' && window.crypto) {
+    return window.crypto;
+  }
+  if (typeof globalThis !== 'undefined' && globalThis.crypto) {
+    return globalThis.crypto as any;
+  }
+  throw new Error('Web Cryptography API is not available in this environment');
+}
+
 /**
  * Derives a 256-bit AES-GCM CryptoKey from master password and salt using PBKDF2
  */
 async function deriveAesKey(password: string, saltBytes: Uint8Array, iterations: number = PBKDF2_ITERATIONS): Promise<CryptoKey> {
+  const cryptoApi = getCrypto();
   const enc = new TextEncoder();
   const passwordBytes = enc.encode(password);
 
-  const baseKey = await window.crypto.subtle.importKey(
+  const baseKey = await cryptoApi.subtle.importKey(
     'raw',
     passwordBytes,
     { name: 'PBKDF2' },
@@ -38,7 +49,7 @@ async function deriveAesKey(password: string, saltBytes: Uint8Array, iterations:
     ['deriveKey']
   );
 
-  return window.crypto.subtle.deriveKey(
+  return cryptoApi.subtle.deriveKey(
     {
       name: 'PBKDF2',
       salt: saltBytes,
@@ -62,15 +73,16 @@ export async function encryptWithPassword(
   plaintext: string, 
   masterPassword: string
 ): Promise<EncryptedVaultData> {
-  const saltBytes = window.crypto.getRandomValues(new Uint8Array(SALT_BYTE_LENGTH));
-  const ivBytes = window.crypto.getRandomValues(new Uint8Array(IV_BYTE_LENGTH));
+  const cryptoApi = getCrypto();
+  const saltBytes = cryptoApi.getRandomValues(new Uint8Array(SALT_BYTE_LENGTH));
+  const ivBytes = cryptoApi.getRandomValues(new Uint8Array(IV_BYTE_LENGTH));
 
   const aesKey = await deriveAesKey(masterPassword, saltBytes, PBKDF2_ITERATIONS);
 
   const enc = new TextEncoder();
   const plaintextBytes = enc.encode(plaintext);
 
-  const encryptedBuffer = await window.crypto.subtle.encrypt(
+  const encryptedBuffer = await cryptoApi.subtle.encrypt(
     {
       name: 'AES-GCM',
       iv: ivBytes
@@ -104,6 +116,7 @@ export async function decryptWithPassword(
   },
   masterPassword: string
 ): Promise<string> {
+  const cryptoApi = getCrypto();
   const saltBytes = hexToUint8Array(encryptedData.saltHex);
   const ivBytes = hexToUint8Array(encryptedData.ivHex);
   const ciphertextBytes = hexToUint8Array(encryptedData.ciphertextHex);
@@ -112,7 +125,7 @@ export async function decryptWithPassword(
   const aesKey = await deriveAesKey(masterPassword, saltBytes, iterations);
 
   try {
-    const decryptedBuffer = await window.crypto.subtle.decrypt(
+    const decryptedBuffer = await cryptoApi.subtle.decrypt(
       {
         name: 'AES-GCM',
         iv: ivBytes

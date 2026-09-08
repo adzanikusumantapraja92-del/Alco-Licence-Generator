@@ -398,6 +398,15 @@ export interface BackupValidationResult {
   backup?: AlcoBackupPayload;
 }
 
+export interface BackupVerificationProof {
+  proofId: string;
+  backupFingerprint: string;
+  backupPublicKeyHex: string;
+  recordCount: number;
+  issuedAt: number;
+  expiresAt: number;
+}
+
 export interface BackupVerificationResult {
   success: boolean;
   error?: string;
@@ -406,7 +415,26 @@ export interface BackupVerificationResult {
   backupFingerprint?: string;
   backupPublicKeyHex?: string;
   recordCount?: number;
-  decryptedPrivateKeyHex?: string;
+  proof?: BackupVerificationProof;
+}
+
+/**
+ * Transient in-memory slot holding the verified backup staged for commit.
+ * Staged ONLY after successful cryptographic decryption and Ed25519 public key derivation.
+ * Automatically invalidated upon commit, cancellation, or expiration.
+ */
+interface StagedBackupEntry {
+  proof: BackupVerificationProof;
+  backup: AlcoBackupPayload;
+}
+
+let stagedVerifiedBackup: StagedBackupEntry | null = null;
+
+/**
+ * Explicitly cancels and clears any staged verified backup in volatile memory
+ */
+export function cancelStagedRestore(): void {
+  stagedVerifiedBackup = null;
 }
 
 /**
@@ -475,14 +503,14 @@ export function validateBackupFileFormat(jsonString: string): BackupValidationRe
  * Stage 2 of Backup Restore:
  * Decrypts backup with provided Master Password, derives Ed25519 public key from private key,
  * compares against vault public key, and detects Authority Identity mismatch.
- * DOES NOT save or commit to storage yet.
+ * DOES NOT return private key to caller. Stages verified backup in memory with a transient proof.
  */
 export async function verifyBackupDecryption(
   backup: AlcoBackupPayload,
   masterPassword: string
 ): Promise<BackupVerificationResult> {
   try {
-    // 1. Decrypt secret payload
+    // 1. Decrypt secret payload in local function scope
     const decryptedRaw = await decryptWithPassword(backup.encryptedVault, masterPassword);
     const secret = JSON.parse(decryptedRaw);
 
@@ -510,16 +538,43 @@ export async function verifyBackupDecryption(
       currentVault.fingerprint.toUpperCase() !== backup.encryptedVault.fingerprint.toUpperCase()
     );
 
+    // 5. Generate secure transient cryptographic verification proof
+    const randomBytes = new Uint8Array(16);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      crypto.getRandomValues(randomBytes);
+    } else {
+      for (let i = 0; i < 16; i++) randomBytes[i] = Math.floor(Math.random() * 256);
+    }
+    const proofId = Array.from(randomBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    const now = Date.now();
+
+    const proof: BackupVerificationProof = {
+      proofId,
+      backupFingerprint: backup.encryptedVault.fingerprint,
+      backupPublicKeyHex: backup.encryptedVault.publicKeyHex,
+      recordCount: Array.isArray(backup.history) ? backup.history.length : 0,
+      issuedAt: now,
+      expiresAt: now + (5 * 60 * 1000) // 5 minutes validity
+    };
+
+    // 6. Stage verified backup in volatile memory bound to this proof
+    stagedVerifiedBackup = {
+      proof,
+      backup: JSON.parse(JSON.stringify(backup))
+    };
+
+    // NOTE: secret.privateKeyHex is completely discarded here and NEVER returned to caller or UI
     return {
       success: true,
       isDifferentAuthority,
       activeFingerprint: currentVault?.fingerprint,
       backupFingerprint: backup.encryptedVault.fingerprint,
       backupPublicKeyHex: backup.encryptedVault.publicKeyHex,
-      recordCount: Array.isArray(backup.history) ? backup.history.length : 0,
-      decryptedPrivateKeyHex: secret.privateKeyHex
+      recordCount: proof.recordCount,
+      proof
     };
   } catch (err: any) {
+    stagedVerifiedBackup = null;
     return {
       success: false,
       error: err?.message || 'Failed to decrypt backup. Incorrect Master Password.'
@@ -529,25 +584,66 @@ export async function verifyBackupDecryption(
 
 /**
  * Stage 3 of Backup Restore:
- * Commits the verified backup to localStorage after all cryptographic checks and confirmations pass.
+ * Commits the verified backup to localStorage.
+ * STRICTLY REQUIRES a valid, unexpired BackupVerificationProof from verifyBackupDecryption.
+ * Raw or unverified backups cannot bypass this check.
  */
-export function commitRestoreBackup(backup: AlcoBackupPayload): { success: boolean; message: string } {
-  try {
-    saveEncryptedVault(backup.encryptedVault);
+export function commitRestoreBackup(proof: BackupVerificationProof): { success: boolean; message: string } {
+  if (!proof || typeof proof !== 'object' || !proof.proofId) {
+    return {
+      success: false,
+      message: 'Restore rejected: Cryptographic verification proof is required. Raw or unverified backups cannot be committed.'
+    };
+  }
 
-    if (Array.isArray(backup.history)) {
-      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(backup.history));
+  if (!stagedVerifiedBackup) {
+    return {
+      success: false,
+      message: 'Restore rejected: No verified backup staged in memory. Please verify backup with Master Password first.'
+    };
+  }
+
+  // Cryptographic identity check between proof and staged backup
+  if (
+    stagedVerifiedBackup.proof.proofId !== proof.proofId ||
+    stagedVerifiedBackup.proof.backupFingerprint !== proof.backupFingerprint ||
+    stagedVerifiedBackup.proof.backupPublicKeyHex !== proof.backupPublicKeyHex
+  ) {
+    return {
+      success: false,
+      message: 'Restore rejected: Verification proof mismatch or forgery detected.'
+    };
+  }
+
+  // Check proof expiration (5-minute transient window)
+  if (Date.now() > stagedVerifiedBackup.proof.expiresAt) {
+    stagedVerifiedBackup = null;
+    return {
+      success: false,
+      message: 'Restore rejected: Verification proof expired. Please re-verify backup with Master Password.'
+    };
+  }
+
+  try {
+    const verifiedBackup = stagedVerifiedBackup.backup;
+    saveEncryptedVault(verifiedBackup.encryptedVault);
+
+    if (Array.isArray(verifiedBackup.history)) {
+      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(verifiedBackup.history));
     }
-    if (backup.settings) {
-      localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(backup.settings));
+    if (verifiedBackup.settings) {
+      localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(verifiedBackup.settings));
     }
-    if (Array.isArray(backup.customApps)) {
-      localStorage.setItem(STORAGE_KEYS.CUSTOM_APPS, JSON.stringify(backup.customApps));
+    if (Array.isArray(verifiedBackup.customApps)) {
+      localStorage.setItem(STORAGE_KEYS.CUSTOM_APPS, JSON.stringify(verifiedBackup.customApps));
     }
+
+    // Invalidate staged slot immediately upon commit
+    stagedVerifiedBackup = null;
 
     return {
       success: true,
-      message: 'Encrypted Vault and licensing records successfully restored.'
+      message: 'Encrypted Vault and licensing records successfully restored from cryptographically verified backup.'
     };
   } catch (err: any) {
     return {

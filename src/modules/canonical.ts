@@ -138,11 +138,45 @@ export const CANONICAL_TEST_VECTORS: CanonicalTestVector[] = [
       boolFalse: false,
       zero: 0,
       negative: -99.5,
+      decimal: 3.14159,
       emptyStr: '',
       emptyArr: [],
       emptyObj: {}
     },
-    expected: '{"boolFalse":false,"boolTrue":true,"emptyArr":[],"emptyObj":{},"emptyStr":"","negative":-99.5,"nullVal":null,"zero":0}'
+    expected: '{"boolFalse":false,"boolTrue":true,"decimal":3.14159,"emptyArr":[],"emptyObj":{},"emptyStr":"","negative":-99.5,"nullVal":null,"zero":0}'
+  },
+  {
+    name: 'Custom toJSON and Undefined Handling',
+    input: {
+      customDateObj: {
+        toJSON: () => '2026-09-07T12:00:00.000Z'
+      },
+      ignoredUndefined: undefined,
+      arrayWithUndefined: [1, undefined, 'test', null],
+      metadata: {
+        appName: 'ALCO Suite',
+        notes: undefined,
+        issuedBy: 'Authority-1'
+      }
+    },
+    expected: '{"arrayWithUndefined":[1,null,"test",null],"customDateObj":"2026-09-07T12:00:00.000Z","metadata":{"appName":"ALCO Suite","issuedBy":"Authority-1"}}'
+  },
+  {
+    name: 'License Payload Ordering and Canonical Shape',
+    input: {
+      plan: 'pro',
+      licenseVersion: '1.0',
+      expiresAt: null,
+      deviceId: 'ALCO-DEV-9B4A-71E2-5D88',
+      features: ['gpu_accel', 'cloud_sync', 'batch_export'],
+      customerId: 'CUST-4029',
+      licenseId: 'LIC-ALCO-2026-9B4A',
+      issuedAt: '2026-09-07T10:00:00.000Z',
+      appId: 'alco-content-engine',
+      licenseType: 'lifetime',
+      metadata: { notes: 'VIP Customer', appName: 'ALCO Content Engine' }
+    },
+    expected: '{"appId":"alco-content-engine","customerId":"CUST-4029","deviceId":"ALCO-DEV-9B4A-71E2-5D88","expiresAt":null,"features":["gpu_accel","cloud_sync","batch_export"],"issuedAt":"2026-09-07T10:00:00.000Z","licenseId":"LIC-ALCO-2026-9B4A","licenseType":"lifetime","licenseVersion":"1.0","metadata":{"appName":"ALCO Content Engine","notes":"VIP Customer"},"plan":"pro"}'
   }
 ];
 
