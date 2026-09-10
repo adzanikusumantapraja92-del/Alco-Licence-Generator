@@ -37,6 +37,7 @@ import {
   getLicensesForCustomer,
   upsertCustomerFromRequest,
 } from '../modules/customer-registry';
+import { authorityClient } from '../modules/authority-client';
 
 interface DashboardViewProps {
   keyPair: OwnerKeyPair | null;
@@ -44,8 +45,7 @@ interface DashboardViewProps {
   onSaveLicense: (record: AlcoLicenseRecord) => void;
   onNavigateToSimulator: (licenseKey: string, appId: string, deviceId: string) => void;
   vaultStatus: VaultStatus;
-  inMemoryPrivateKey: string | null;
-  onRequestUnlock: (onUnlocked: (privateKey: string) => void) => void;
+  onRequestUnlock: (onUnlocked: () => void) => void;
   onRequestSetup: () => void;
 }
 
@@ -55,7 +55,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onSaveLicense,
   onNavigateToSimulator,
   vaultStatus,
-  inMemoryPrivateKey,
   onRequestUnlock,
   onRequestSetup
 }) => {
@@ -200,12 +199,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
   };
 
-  // 7. Execute Signing using decrypted in-memory Ed25519 private key
-  const executeSigning = (privateKeyHex: string) => {
+  // 7. Execute Signing via Authority Service (Main Process / Isolated Authority)
+  const executeSigning = async () => {
     setIsGenerating(true);
 
     try {
-      const { payload, canonicalPayload } = createLicensePayload({
+      const res = await authorityClient.generateLicense({
         appId: selectedAppId,
         deviceId,
         customerId,
@@ -221,15 +220,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         }
       });
 
-      // Digitally sign canonical payload with decrypted Ed25519 private key
-      const signatureHex = signCanonicalPayload(canonicalPayload, privateKeyHex);
-      const licenseKey = packageLicenseKey(canonicalPayload, signatureHex);
+      if (!res.success || !res.licenseKey || !res.payload || !res.signature || !res.canonicalString) {
+        throw new Error(res.error || 'License generation failed');
+      }
 
       setGeneratedLicense({
-        licenseKey,
-        payload,
-        signature: signatureHex,
-        canonicalString: canonicalPayload
+        licenseKey: res.licenseKey,
+        payload: res.payload,
+        signature: res.signature,
+        canonicalString: res.canonicalString
       });
       setHasSaved(false);
       setCopied(false);
@@ -252,14 +251,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       return;
     }
 
-    if (!inMemoryPrivateKey || vaultStatus === 'locked') {
-      onRequestUnlock((unlockedPrivKey) => {
-        executeSigning(unlockedPrivKey);
+    if (vaultStatus === 'locked') {
+      onRequestUnlock(() => {
+        executeSigning();
       });
       return;
     }
 
-    executeSigning(inMemoryPrivateKey);
+    executeSigning();
   };
 
   // Copy License

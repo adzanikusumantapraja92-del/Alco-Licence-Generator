@@ -1,0 +1,103 @@
+/**
+ * ALCO License Generator - Electron Main Process Entry Point
+ * 
+ * Cryptographic Licensing Authority Host Process
+ * Owns file persistence under app.getPath('userData')
+ * Owns volatile Ed25519 signing authority
+ * Enforces strict webPreferences and navigation denial
+ */
+
+import { app, BrowserWindow } from 'electron';
+import path from 'node:path';
+import { ElectronFileStorageService } from './services/storage-service';
+import { MainVaultService } from './services/vault-service';
+import { MainSigningService } from './services/signing-service';
+import { MainBackupService } from './services/backup-service';
+import { registerIpcHandlers } from './ipc/handlers';
+
+let mainWindow: BrowserWindow | null = null;
+let vaultService: MainVaultService | null = null;
+
+function createWindow(): void {
+  // Preload location: In development / production build
+  const preloadPath = path.join(__dirname, 'preload.js');
+
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 860,
+    minWidth: 980,
+    minHeight: 700,
+    title: 'ALCO License Generator — Owner Licensing Authority',
+    backgroundColor: '#020617', // slate-950
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      preload: preloadPath
+    }
+  });
+
+  // Security: Block all attempts to open new browser windows
+  mainWindow.webContents.setWindowOpenHandler(() => {
+    return { action: 'deny' };
+  });
+
+  // Security: Block arbitrary external navigation
+  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
+    const parsed = new URL(navigationUrl);
+    // Only allow localhost dev server or local file
+    if (parsed.protocol !== 'file:' && !parsed.host.startsWith('localhost') && !parsed.host.startsWith('127.0.0.1')) {
+      event.preventDefault();
+    }
+  });
+
+  // Load UI
+  if (process.env.VITE_DEV_SERVER_URL) {
+    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+  } else {
+    // Production dist loading
+    const indexPath = path.join(__dirname, '../dist/index.html');
+    mainWindow.loadFile(indexPath);
+  }
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+// Application Lifecycle
+app.whenReady().then(() => {
+  const userDataDir = app.getPath('userData');
+  const storageService = new ElectronFileStorageService(userDataDir);
+  vaultService = new MainVaultService(storageService);
+  const signingService = new MainSigningService(vaultService, storageService);
+  const backupService = new MainBackupService(storageService, vaultService);
+
+  // Register strictly typed IPC handlers
+  registerIpcHandlers(vaultService, signingService, storageService, backupService);
+
+  createWindow();
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (vaultService) {
+    vaultService.lockVault();
+  }
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
+
+app.on('before-quit', () => {
+  // Clear any residual memory
+  if (vaultService) {
+    vaultService.lockVault();
+  }
+});

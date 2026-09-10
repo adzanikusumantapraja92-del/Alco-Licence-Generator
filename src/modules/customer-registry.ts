@@ -49,6 +49,48 @@ export function findCustomerByEmail(email: string): AlcoCustomerRecord | null {
   return getCustomerRegistry().find(c => c.emailNormalized === normalized) || null;
 }
 
+export function resolveOrCreateCustomerRecord(
+  existingCustomers: AlcoCustomerRecord[],
+  input: {
+    name: string;
+    email: string;
+    whatsapp?: string;
+    segment?: string;
+    acquisitionSource?: string;
+    marketingConsent?: boolean;
+  }
+): { customer: AlcoCustomerRecord; created: boolean; updatedRegistry: AlcoCustomerRecord[] } {
+  const emailNormalized = normalizeCustomerEmail(input.email);
+  if (!input.name.trim()) throw new Error('Customer name is required');
+  if (!emailNormalized || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNormalized)) {
+    throw new Error('Valid customer email is required');
+  }
+
+  const existing = existingCustomers.find(c => c.emailNormalized === emailNormalized);
+  if (existing) {
+    return { customer: existing, created: false, updatedRegistry: existingCustomers };
+  }
+
+  const now = new Date().toISOString();
+  const customer: AlcoCustomerRecord = {
+    customerId: generateCustomerId(input.name, existingCustomers),
+    name: input.name.trim(),
+    email: input.email.trim(),
+    emailNormalized,
+    whatsapp: input.whatsapp?.trim() || undefined,
+    segment: input.segment?.trim() || undefined,
+    acquisitionSource: input.acquisitionSource?.trim() || undefined,
+    marketingConsent: input.marketingConsent,
+    createdAt: now,
+    updatedAt: now,
+  };
+  return {
+    customer,
+    created: true,
+    updatedRegistry: [customer, ...existingCustomers]
+  };
+}
+
 export function upsertCustomerFromRequest(input: {
   name: string;
   email: string;

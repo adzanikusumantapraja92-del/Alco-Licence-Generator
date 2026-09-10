@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { ShieldAlert, Lock, KeyRound, Check, AlertTriangle, Eye, EyeOff, Sparkles } from 'lucide-react';
-import { initializeOwnerVault, getLegacyPlaintextKeyPair } from '../modules/storage';
-import { EncryptedOwnerVault } from '../modules/types';
+import { authorityClient } from '../modules/authority-client';
+import { getLegacyPlaintextKeyPair } from '../modules/storage';
 
 interface VaultSetupModalProps {
   isOpen: boolean;
-  onSetupComplete: (vault: EncryptedOwnerVault, inMemoryPrivateKey: string) => void;
+  onSetupComplete: (meta: { publicKeyHex: string; fingerprint: string }) => void;
 }
 
 export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
@@ -43,13 +43,19 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
       // Delay slightly to let UI render loading spinner
       await new Promise(r => setTimeout(r, 100));
 
-      const { vault, privateKeyHex } = await initializeOwnerVault(
-        password,
-        legacyKey || undefined,
-        hint
-      );
+      const res = await authorityClient.setupVault({
+        masterPassword: password,
+        vaultHint: hint
+      });
 
-      onSetupComplete(vault, privateKeyHex);
+      if (!res.success) {
+        throw new Error(res.error || 'Failed to initialize encrypted vault.');
+      }
+
+      onSetupComplete({
+        publicKeyHex: res.publicKeyHex,
+        fingerprint: res.fingerprint
+      });
     } catch (err: any) {
       setError(err?.message || 'Failed to initialize encrypted vault.');
     } finally {

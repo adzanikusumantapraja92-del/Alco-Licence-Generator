@@ -3,10 +3,10 @@
  * Aladzan Corpora Ecosystem - Owner Licensing Authority
  * 
  * Cryptographic Architecture:
- * - Ed25519 Asymmetric Digital Signatures (tweetnacl)
- * - Encrypted Owner Vault (AES-256-GCM, PBKDF2-SHA-256 250k iterations)
- * - Zero Plaintext Private Keys in Storage
- * - Purely In-Memory Decryption for Signing Operations
+ * - Ed25519 Asymmetric Digital Signatures
+ * - Encrypted Owner Vault (AES-256-GCM, PBKDF2-SHA-256)
+ * - Zero Plaintext Private Keys in Storage or React State
+ * - Electron Main Process Authority Boundary
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -22,18 +22,18 @@ import { VaultUnlockModal } from './components/VaultUnlockModal';
 import { 
   OwnerKeyPair, 
   AlcoLicenseRecord, 
-  AlcoAppDefinition,
-  VaultStatus,
-  EncryptedOwnerVault 
+  AlcoAppDefinition, 
+  VaultStatus 
 } from './modules/types';
+import { authorityClient } from './modules/authority-client';
 import { 
-  hasOwnerVault,
-  getOwnerPublicMeta,
+  hasOwnerVault, 
+  getOwnerPublicMeta, 
   getLicenseHistory, 
   saveLicenseToHistory, 
   updateLicenseStatus, 
-  deleteLicenseFromHistory,
-  getOwnerSettings
+  deleteLicenseFromHistory, 
+  getOwnerSettings 
 } from './modules/storage';
 import { 
   getRegisteredApps, 
@@ -44,14 +44,10 @@ import {
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('generator');
   
-  // Vault & Cryptographic States
+  // Vault & Cryptographic States (NO inMemoryPrivateKey in React state!)
   const [vaultStatus, setVaultStatus] = useState<VaultStatus>(() => {
     return hasOwnerVault() ? 'locked' : 'uninitialized';
   });
-  
-  // STRICTLY VOLATILE: decrypted private key exists ONLY in React memory state while unlocked.
-  // NEVER persisted to localStorage or sessionStorage!
-  const [inMemoryPrivateKey, setInMemoryPrivateKey] = useState<string | null>(null);
 
   // Public key metadata (safe to display and embed into client builds)
   const [keyPair, setKeyPair] = useState<OwnerKeyPair | null>(() => getOwnerPublicMeta());
@@ -60,7 +56,7 @@ export default function App() {
   const [isSetupOpen, setIsSetupOpen] = useState<boolean>(() => !hasOwnerVault());
   const [isUnlockOpen, setIsUnlockOpen] = useState<boolean>(false);
   const [unlockReason, setUnlockReason] = useState<string>('Sign ALCO License Key');
-  const [pendingUnlockCallback, setPendingUnlockCallback] = useState<((privKey: string) => void) | null>(null);
+  const [pendingUnlockCallback, setPendingUnlockCallback] = useState<(() => void) | null>(null);
 
   // Storage states
   const [registeredApps, setRegisteredApps] = useState<AlcoAppDefinition[]>(() => getRegisteredApps());
@@ -72,6 +68,28 @@ export default function App() {
     appId: string;
     deviceId: string;
   } | null>(null);
+
+  // Sync initial status with authority service
+  useEffect(() => {
+    authorityClient.getVaultStatus().then((res) => {
+      setVaultStatus(res.status);
+      if (res.publicKeyHex && res.fingerprint) {
+        setKeyPair({
+          publicKeyHex: res.publicKeyHex,
+          fingerprint: res.fingerprint,
+          createdAt: res.createdAt || new Date().toISOString()
+        });
+      }
+      if (res.status === 'uninitialized') {
+        setIsSetupOpen(true);
+      }
+    });
+  }, []);
+
+  const handleLockVault = useCallback(async () => {
+    await authorityClient.lockVault();
+    setVaultStatus('locked');
+  }, []);
 
   // Auto-lock on inactivity timer
   useEffect(() => {
@@ -87,52 +105,56 @@ export default function App() {
     }, timeoutMs);
 
     return () => clearTimeout(timer);
-  }, [vaultStatus, inMemoryPrivateKey]);
+  }, [vaultStatus, handleLockVault]);
 
   const refreshAllData = useCallback(() => {
-    const publicMeta = getOwnerPublicMeta();
-    setKeyPair(publicMeta);
+    authorityClient.getVaultStatus().then((res) => {
+      setVaultStatus(res.status);
+      if (res.publicKeyHex && res.fingerprint) {
+        setKeyPair({
+          publicKeyHex: res.publicKeyHex,
+          fingerprint: res.fingerprint,
+          createdAt: res.createdAt || new Date().toISOString()
+        });
+      }
+    });
     setRegisteredApps(getRegisteredApps());
     setHistory(getLicenseHistory());
-    if (!hasOwnerVault()) {
-      setVaultStatus('uninitialized');
-      setInMemoryPrivateKey(null);
-    }
   }, []);
 
-  const handleLockVault = useCallback(() => {
-    setInMemoryPrivateKey(null);
-    setVaultStatus('locked');
-  }, []);
-
-  const handleRequestUnlock = useCallback((callback?: (privKey: string) => void, reason = 'Sign ALCO License Key') => {
-    if (inMemoryPrivateKey && vaultStatus === 'unlocked') {
-      callback?.(inMemoryPrivateKey);
+  const handleRequestUnlock = useCallback((callback?: () => void, reason = 'Sign ALCO License Key') => {
+    if (vaultStatus === 'unlocked') {
+      callback?.();
       return;
     }
     setUnlockReason(reason);
     setPendingUnlockCallback(() => callback || null);
     setIsUnlockOpen(true);
-  }, [inMemoryPrivateKey, vaultStatus]);
+  }, [vaultStatus]);
 
-  const handleUnlockSuccess = useCallback((decryptedPrivateKey: string) => {
-    setInMemoryPrivateKey(decryptedPrivateKey);
+  const handleUnlockSuccess = useCallback((meta?: { publicKeyHex?: string; fingerprint?: string }) => {
     setVaultStatus('unlocked');
+    if (meta?.publicKeyHex && meta?.fingerprint) {
+      setKeyPair(prev => ({
+        publicKeyHex: meta.publicKeyHex!,
+        fingerprint: meta.fingerprint!,
+        createdAt: prev?.createdAt || new Date().toISOString()
+      }));
+    }
     setIsUnlockOpen(false);
 
     if (pendingUnlockCallback) {
-      pendingUnlockCallback(decryptedPrivateKey);
+      pendingUnlockCallback();
       setPendingUnlockCallback(null);
     }
   }, [pendingUnlockCallback]);
 
-  const handleSetupComplete = useCallback((vault: EncryptedOwnerVault, initialPrivateKey: string) => {
+  const handleSetupComplete = useCallback((meta: { publicKeyHex: string; fingerprint: string }) => {
     setKeyPair({
-      publicKeyHex: vault.publicKeyHex,
-      fingerprint: vault.fingerprint,
-      createdAt: vault.createdAt
+      publicKeyHex: meta.publicKeyHex,
+      fingerprint: meta.fingerprint,
+      createdAt: new Date().toISOString()
     });
-    setInMemoryPrivateKey(initialPrivateKey);
     setVaultStatus('unlocked');
     setIsSetupOpen(false);
   }, []);
@@ -188,7 +210,6 @@ export default function App() {
             onSaveLicense={handleSaveLicense}
             onNavigateToSimulator={handleNavigateToSimulator}
             vaultStatus={vaultStatus}
-            inMemoryPrivateKey={inMemoryPrivateKey}
             onRequestUnlock={(onSuccess) => handleRequestUnlock(onSuccess, 'Sign ALCO License Key')}
             onRequestSetup={() => setIsSetupOpen(true)}
           />

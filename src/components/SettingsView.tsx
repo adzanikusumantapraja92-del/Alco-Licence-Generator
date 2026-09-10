@@ -38,7 +38,7 @@ interface SettingsViewProps {
   keyPair: OwnerKeyPair | null;
   vaultStatus: VaultStatus;
   onLockVault: () => void;
-  onRequestUnlock: (onUnlocked: (privateKey: string) => void) => void;
+  onRequestUnlock: (onUnlocked?: () => void) => void;
   onRequestSetup: () => void;
   onRefreshData: () => void;
 }

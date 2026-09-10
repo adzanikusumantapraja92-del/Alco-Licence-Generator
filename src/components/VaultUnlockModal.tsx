@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { Lock, Unlock, ShieldAlert, AlertTriangle, Eye, EyeOff, X } from 'lucide-react';
-import { unlockOwnerVault, getEncryptedVault } from '../modules/storage';
+import { authorityClient } from '../modules/authority-client';
+import { getEncryptedVault } from '../modules/storage';
 
 interface VaultUnlockModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onUnlockSuccess: (privateKeyHex: string) => void;
+  onUnlockSuccess: (meta?: { publicKeyHex?: string; fingerprint?: string }) => void;
   actionReason?: string;
 }
 
@@ -33,9 +34,15 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     try {
       // Small pause for visual feedback
       await new Promise(r => setTimeout(r, 60));
-      const { privateKeyHex } = await unlockOwnerVault(password);
+      const res = await authorityClient.unlockVault({ masterPassword: password });
+      if (!res.success) {
+        throw new Error(res.error || 'Incorrect Master Password.');
+      }
       setPassword('');
-      onUnlockSuccess(privateKeyHex);
+      onUnlockSuccess({
+        publicKeyHex: res.publicKeyHex,
+        fingerprint: res.fingerprint
+      });
     } catch (err: any) {
       setError(err?.message || 'Incorrect Master Password.');
     } finally {
