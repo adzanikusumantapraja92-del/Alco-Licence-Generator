@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Lock, Unlock, ShieldAlert, AlertTriangle, Eye, EyeOff, X } from 'lucide-react';
 import { authorityClient } from '../modules/authority-client';
-import { getEncryptedVault } from '../modules/storage';
 
 interface VaultUnlockModalProps {
   isOpen: boolean;
@@ -20,8 +19,17 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [vaultMeta, setVaultMeta] = useState<{ fingerprint?: string; vaultHint?: string } | null>(null);
 
-  const vault = getEncryptedVault();
+  useEffect(() => {
+    if (!isOpen) return;
+    authorityClient.getVaultStatus().then((status) => {
+      setVaultMeta({
+        fingerprint: status.fingerprint,
+        vaultHint: status.vaultHint
+      });
+    });
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -88,10 +96,10 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
         </div>
 
         {/* Vault Fingerprint badge */}
-        {vault && (
+        {vaultMeta?.fingerprint && (
           <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-950 border border-slate-850 text-xs font-mono">
             <span className="text-slate-400">Authority Fingerprint:</span>
-            <span className="text-indigo-400 font-semibold">{vault.fingerprint}</span>
+            <span className="text-indigo-400 font-semibold">{vaultMeta.fingerprint}</span>
           </div>
         )}
 
@@ -102,9 +110,9 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
               <label className="font-semibold text-slate-300">
                 Master Password
               </label>
-              {vault?.vaultHint && (
+              {vaultMeta?.vaultHint && (
                 <span className="text-[11px] text-slate-400">
-                  Hint: <span className="text-slate-300 italic">{vault.vaultHint}</span>
+                  Hint: <span className="text-slate-300 italic">{vaultMeta.vaultHint}</span>
                 </span>
               )}
             </div>

@@ -26,41 +26,33 @@ import {
   VaultStatus 
 } from './modules/types';
 import { authorityClient } from './modules/authority-client';
-import { 
-  hasOwnerVault, 
-  getOwnerPublicMeta, 
-  getLicenseHistory, 
-  saveLicenseToHistory, 
-  updateLicenseStatus, 
-  deleteLicenseFromHistory, 
-  getOwnerSettings 
-} from './modules/storage';
-import { 
-  getRegisteredApps, 
-  saveCustomApp, 
-  deleteCustomApp 
-} from './modules/application-registry';
+import { DEFAULT_ALCO_APPS } from './modules/application-registry';
+
+function mergeRegisteredApps(customApps: AlcoAppDefinition[]): AlcoAppDefinition[] {
+  return [
+    ...DEFAULT_ALCO_APPS,
+    ...customApps.filter(app => !DEFAULT_ALCO_APPS.some(systemApp => systemApp.id === app.id))
+  ];
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('generator');
   
   // Vault & Cryptographic States (NO inMemoryPrivateKey in React state!)
-  const [vaultStatus, setVaultStatus] = useState<VaultStatus>(() => {
-    return hasOwnerVault() ? 'locked' : 'uninitialized';
-  });
+  const [vaultStatus, setVaultStatus] = useState<VaultStatus>('uninitialized');
 
   // Public key metadata (safe to display and embed into client builds)
-  const [keyPair, setKeyPair] = useState<OwnerKeyPair | null>(() => getOwnerPublicMeta());
+  const [keyPair, setKeyPair] = useState<OwnerKeyPair | null>(null);
 
   // Modal Dialog states
-  const [isSetupOpen, setIsSetupOpen] = useState<boolean>(() => !hasOwnerVault());
+  const [isSetupOpen, setIsSetupOpen] = useState<boolean>(false);
   const [isUnlockOpen, setIsUnlockOpen] = useState<boolean>(false);
   const [unlockReason, setUnlockReason] = useState<string>('Sign ALCO License Key');
   const [pendingUnlockCallback, setPendingUnlockCallback] = useState<(() => void) | null>(null);
 
   // Storage states
-  const [registeredApps, setRegisteredApps] = useState<AlcoAppDefinition[]>(() => getRegisteredApps());
-  const [history, setHistory] = useState<AlcoLicenseRecord[]>(() => getLicenseHistory());
+  const [registeredApps, setRegisteredApps] = useState<AlcoAppDefinition[]>(() => mergeRegisteredApps([]));
+  const [history, setHistory] = useState<AlcoLicenseRecord[]>([]);
 
   // Simulator jump state
   const [simulatorPrefill, setSimulatorPrefill] = useState<{
@@ -84,6 +76,8 @@ export default function App() {
         setIsSetupOpen(true);
       }
     });
+    authorityClient.getCustomApps().then((apps) => setRegisteredApps(mergeRegisteredApps(apps)));
+    authorityClient.getHistory().then(setHistory);
   }, []);
 
   const handleLockVault = useCallback(async () => {
@@ -95,16 +89,19 @@ export default function App() {
   useEffect(() => {
     if (vaultStatus !== 'unlocked') return;
 
-    const settings = getOwnerSettings();
-    const lockMinutes = settings.autoLockMinutes || 15;
-    if (lockMinutes <= 0) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    authorityClient.getSettings().then((settings) => {
+      const lockMinutes = settings.autoLockMinutes || 15;
+      if (lockMinutes <= 0) return;
 
-    const timeoutMs = lockMinutes * 60 * 1000;
-    const timer = setTimeout(() => {
-      handleLockVault();
-    }, timeoutMs);
+      timer = setTimeout(() => {
+        handleLockVault();
+      }, lockMinutes * 60 * 1000);
+    });
 
-    return () => clearTimeout(timer);
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [vaultStatus, handleLockVault]);
 
   const refreshAllData = useCallback(() => {
@@ -118,8 +115,8 @@ export default function App() {
         });
       }
     });
-    setRegisteredApps(getRegisteredApps());
-    setHistory(getLicenseHistory());
+    authorityClient.getCustomApps().then((apps) => setRegisteredApps(mergeRegisteredApps(apps)));
+    authorityClient.getHistory().then(setHistory);
   }, []);
 
   const handleRequestUnlock = useCallback((callback?: () => void, reason = 'Sign ALCO License Key') => {
@@ -159,29 +156,31 @@ export default function App() {
     setIsSetupOpen(false);
   }, []);
 
-  const handleSaveLicense = (record: AlcoLicenseRecord) => {
-    saveLicenseToHistory(record);
-    setHistory(getLicenseHistory());
+  const handleSaveLicense = async (record: AlcoLicenseRecord) => {
+    await authorityClient.saveLicenseRecord(record);
+    setHistory(await authorityClient.getHistory());
   };
 
-  const handleUpdateStatus = (id: string, status: 'active' | 'revoked') => {
-    updateLicenseStatus(id, status);
-    setHistory(getLicenseHistory());
+  const handleUpdateStatus = async (id: string, status: 'active' | 'revoked') => {
+    await authorityClient.updateLicenseStatus(id, status);
+    setHistory(await authorityClient.getHistory());
   };
 
-  const handleDeleteRecord = (id: string) => {
-    deleteLicenseFromHistory(id);
-    setHistory(getLicenseHistory());
+  const handleDeleteRecord = async (id: string) => {
+    await authorityClient.deleteLicenseRecord(id);
+    setHistory(await authorityClient.getHistory());
   };
 
-  const handleSaveApp = (app: AlcoAppDefinition) => {
-    saveCustomApp(app);
-    setRegisteredApps(getRegisteredApps());
+  const handleSaveApp = async (app: AlcoAppDefinition) => {
+    const currentCustomApps = (await authorityClient.getCustomApps()).filter(item => item.id !== app.id);
+    await authorityClient.saveCustomApps([...currentCustomApps, { ...app, isSystem: false }]);
+    setRegisteredApps(mergeRegisteredApps(await authorityClient.getCustomApps()));
   };
 
-  const handleDeleteApp = (appId: string) => {
-    deleteCustomApp(appId);
-    setRegisteredApps(getRegisteredApps());
+  const handleDeleteApp = async (appId: string) => {
+    const currentCustomApps = (await authorityClient.getCustomApps()).filter(item => item.id !== appId);
+    await authorityClient.saveCustomApps(currentCustomApps);
+    setRegisteredApps(mergeRegisteredApps(await authorityClient.getCustomApps()));
   };
 
   const handleNavigateToSimulator = (licenseKey: string, appId: string, deviceId: string) => {

@@ -43,9 +43,80 @@ import {
 } from './persistence/persistence-interface';
 import { LocalStoragePersistenceAdapter } from './persistence/local-storage-adapter';
 import { encryptWithPassword, decryptWithPassword } from './vault-crypto';
-import { generateEd25519KeyPair, signCanonicalPayload, packageLicenseKey } from './signing';
+import {
+  derivePublicKeyHexFromSecretKey,
+  generateEd25519KeyPair,
+  isStrictHex,
+  isValidPublicKeyHex,
+  isValidSecretKeyHex,
+  signCanonicalPayload,
+  packageLicenseKey
+} from './signing';
 import { createLicensePayload } from './license-payload';
 import { resolveOrCreateCustomerRecord } from './customer-registry';
+
+const MAX_BACKUP_JSON_LENGTH = 5 * 1024 * 1024;
+
+function validateSecretMatchesVault(secretPayload: any, vault: AlcoBackupPayload['encryptedVault']): string {
+  const privateKeyHex = typeof secretPayload?.privateKeyHex === 'string'
+    ? secretPayload.privateKeyHex.trim()
+    : '';
+
+  if (!isValidSecretKeyHex(privateKeyHex)) {
+    throw new Error('Corrupted vault: Invalid Ed25519 private key format.');
+  }
+
+  const derived = derivePublicKeyHexFromSecretKey(privateKeyHex);
+  if (derived.publicKeyHex.toLowerCase() !== vault.publicKeyHex.toLowerCase()) {
+    throw new Error('Corrupted vault: Private key does not match stored public key.');
+  }
+  if (derived.fingerprint !== vault.fingerprint) {
+    throw new Error('Corrupted vault: Authority fingerprint does not match derived public key.');
+  }
+
+  return privateKeyHex;
+}
+
+function isStrictHexLength(value: unknown, length: number): boolean {
+  return typeof value === 'string' && value.length === length && isStrictHex(value);
+}
+
+function isValidCustomerRegistryPayload(customers: unknown): boolean {
+  if (customers === undefined) return true;
+  if (!Array.isArray(customers) || customers.length > 10000) return false;
+
+  return customers.every((customer) => {
+    if (!customer || typeof customer !== 'object') return false;
+    const c = customer as Record<string, unknown>;
+    return (
+      typeof c.customerId === 'string' &&
+      c.customerId.length > 0 &&
+      c.customerId.length <= 80 &&
+      typeof c.name === 'string' &&
+      c.name.length <= 160 &&
+      typeof c.email === 'string' &&
+      c.email.length > 0 &&
+      c.email.length <= 254 &&
+      typeof c.emailNormalized === 'string' &&
+      c.emailNormalized.length > 0 &&
+      c.emailNormalized.length <= 254 &&
+      typeof c.createdAt === 'string' &&
+      typeof c.updatedAt === 'string'
+    );
+  });
+}
+
+function createProofId(): string {
+  const bytes = new Uint8Array(12);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return `proof-${Date.now()}-${Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')}`;
+}
 
 // Browser fallback closure: holds private key in module scope, away from React state
 let browserVolatilePrivateKey: string | null = null;
@@ -141,11 +212,9 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
       );
 
       const secretPayload = JSON.parse(decryptedJson);
-      if (!secretPayload.privateKeyHex) {
-        throw new Error('Corrupted vault.');
-      }
+      const privateKeyHex = validateSecretMatchesVault(secretPayload, vault);
 
-      browserVolatilePrivateKey = secretPayload.privateKeyHex;
+      browserVolatilePrivateKey = privateKeyHex;
       browserVolatileFingerprint = vault.fingerprint;
 
       return {
@@ -187,6 +256,9 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
         },
         input.currentPassword
       );
+
+      const secretPayload = JSON.parse(decryptedJson);
+      validateSecretMatchesVault(secretPayload, vault);
 
       const newEncrypted = await encryptWithPassword(decryptedJson, input.newPassword);
       const updatedVault = {
@@ -323,11 +395,32 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
   async validateBackup(rawJson: string): Promise<BackupValidationResult> {
     try {
       if (!rawJson?.trim()) return { valid: false, error: 'Empty backup content.' };
+      if (rawJson.length > MAX_BACKUP_JSON_LENGTH) {
+        return { valid: false, error: 'Backup content is too large.' };
+      }
       const parsed = JSON.parse(rawJson);
+      if (parsed.alcoVaultVersion !== '2.0-encrypted') {
+        return { valid: false, error: 'Incompatible backup format. Expected alcoVaultVersion 2.0-encrypted.' };
+      }
       if (!parsed.encryptedVault) return { valid: false, error: 'Missing encryptedVault field.' };
       const v = parsed.encryptedVault;
       if (v.version !== '2.0-aes-gcm' || v.algorithm !== 'AES-256-GCM') {
         return { valid: false, error: 'Incompatible vault encryption version.' };
+      }
+      if (v.kdf !== 'PBKDF2-SHA-256') {
+        return { valid: false, error: 'Incompatible vault KDF.' };
+      }
+      if (!Number.isInteger(v.iterations) || v.iterations < 100000) {
+        return { valid: false, error: 'Invalid vault KDF iterations.' };
+      }
+      if (!isStrictHexLength(v.saltHex, 32) || !isStrictHexLength(v.ivHex, 24) || !isStrictHex(v.ciphertextHex)) {
+        return { valid: false, error: 'Invalid vault encryption encoding.' };
+      }
+      if (!isValidPublicKeyHex(v.publicKeyHex) || typeof v.fingerprint !== 'string' || v.fingerprint.length > 80) {
+        return { valid: false, error: 'Invalid authority public identity in backup.' };
+      }
+      if (!isValidCustomerRegistryPayload(parsed.customers)) {
+        return { valid: false, error: 'Invalid customer registry in backup.' };
       }
       return { valid: true, backup: parsed };
     } catch (err: any) {
@@ -349,10 +442,12 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
       );
 
       const parsed = JSON.parse(decrypted);
-      if (!parsed.privateKeyHex) throw new Error('Corrupted backup: Private key missing.');
+      validateSecretMatchesVault(parsed, v);
+      const currentVault = await browserStorage.getEncryptedVault();
+      const isDifferentAuthority = !!currentVault && currentVault.fingerprint !== v.fingerprint;
 
       const proof: BackupVerificationProof = {
-        proofId: `proof-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        proofId: createProofId(),
         backupFingerprint: v.fingerprint,
         backupPublicKeyHex: v.publicKeyHex,
         recordCount: Array.isArray(backup.history) ? backup.history.length : 0,
@@ -369,6 +464,7 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
         proof,
         backupFingerprint: v.fingerprint,
         backupPublicKeyHex: v.publicKeyHex,
+        isDifferentAuthority,
         recordCount: proof.recordCount,
         customerCount: proof.customerCount
       };
@@ -385,6 +481,12 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
     }
     if (browserStagedProof.proofId !== proof.proofId) {
       return { success: false, error: 'Proof ID mismatch.' };
+    }
+    if (
+      browserStagedProof.backupFingerprint !== proof.backupFingerprint ||
+      browserStagedProof.backupPublicKeyHex !== proof.backupPublicKeyHex
+    ) {
+      return { success: false, error: 'Authority identity mismatch.' };
     }
     if (Date.now() > browserStagedProof.expiresAt) {
       this.cancelStagedRestore();

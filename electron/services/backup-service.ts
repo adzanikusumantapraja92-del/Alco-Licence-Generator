@@ -6,6 +6,7 @@
  */
 
 import { decryptWithPassword } from '../../src/modules/vault-crypto';
+import { derivePublicKeyHexFromSecretKey, isStrictHex, isValidPublicKeyHex, isValidSecretKeyHex } from '../../src/modules/signing';
 import { ElectronFileStorageService } from './storage-service';
 import { MainVaultService } from './vault-service';
 import { 
@@ -17,6 +18,42 @@ import {
   BackupVerificationProof, 
   BackupRestoreResult 
 } from '../types';
+import { randomBytes } from 'node:crypto';
+
+const MAX_BACKUP_JSON_LENGTH = 5 * 1024 * 1024;
+
+function isStrictHexLength(value: unknown, length: number): boolean {
+  return typeof value === 'string' && value.length === length && isStrictHex(value);
+}
+
+function isValidCustomerRegistryPayload(customers: unknown): boolean {
+  if (customers === undefined) return true;
+  if (!Array.isArray(customers) || customers.length > 10000) return false;
+
+  return customers.every((customer) => {
+    if (!customer || typeof customer !== 'object') return false;
+    const c = customer as Record<string, unknown>;
+    return (
+      typeof c.customerId === 'string' &&
+      c.customerId.length > 0 &&
+      c.customerId.length <= 80 &&
+      typeof c.name === 'string' &&
+      c.name.length <= 160 &&
+      typeof c.email === 'string' &&
+      c.email.length > 0 &&
+      c.email.length <= 254 &&
+      typeof c.emailNormalized === 'string' &&
+      c.emailNormalized.length > 0 &&
+      c.emailNormalized.length <= 254 &&
+      typeof c.createdAt === 'string' &&
+      typeof c.updatedAt === 'string'
+    );
+  });
+}
+
+function createProofId(): string {
+  return `proof-${Date.now()}-${randomBytes(12).toString('hex')}`;
+}
 
 export class MainBackupService {
   private readonly storage: ElectronFileStorageService;
@@ -39,8 +76,15 @@ export class MainBackupService {
       if (!rawJson || !rawJson.trim()) {
         return { valid: false, error: 'Empty backup content.' };
       }
+      if (rawJson.length > MAX_BACKUP_JSON_LENGTH) {
+        return { valid: false, error: 'Backup content is too large.' };
+      }
 
       const parsed = JSON.parse(rawJson) as AlcoBackupPayload;
+
+      if (parsed.alcoVaultVersion !== '2.0-encrypted') {
+        return { valid: false, error: 'Incompatible backup format. Expected alcoVaultVersion 2.0-encrypted.' };
+      }
 
       if (!parsed.encryptedVault) {
         return { valid: false, error: 'Missing encryptedVault field in backup file.' };
@@ -56,6 +100,21 @@ export class MainBackupService {
 
       if (!v.ciphertextHex || !v.saltHex || !v.ivHex || !v.publicKeyHex || !v.fingerprint) {
         return { valid: false, error: 'Incomplete vault encryption parameters.' };
+      }
+      if (v.kdf !== 'PBKDF2-SHA-256') {
+        return { valid: false, error: 'Incompatible vault KDF.' };
+      }
+      if (!Number.isInteger(v.iterations) || v.iterations < 100000) {
+        return { valid: false, error: 'Invalid vault KDF iterations.' };
+      }
+      if (!isStrictHexLength(v.saltHex, 32) || !isStrictHexLength(v.ivHex, 24) || !isStrictHex(v.ciphertextHex)) {
+        return { valid: false, error: 'Invalid vault encryption encoding.' };
+      }
+      if (!isValidPublicKeyHex(v.publicKeyHex) || typeof v.fingerprint !== 'string' || v.fingerprint.length > 80) {
+        return { valid: false, error: 'Invalid authority public identity in backup.' };
+      }
+      if (!isValidCustomerRegistryPayload(parsed.customers)) {
+        return { valid: false, error: 'Invalid customer registry in backup.' };
       }
 
       return { valid: true, backup: parsed };
@@ -87,15 +146,26 @@ export class MainBackupService {
       );
 
       const parsed = JSON.parse(decryptedJson);
-      if (!parsed.privateKeyHex) {
-        return { success: false, error: 'Corrupted backup: Private key is missing.' };
+      const privateKeyHex = typeof parsed?.privateKeyHex === 'string' ? parsed.privateKeyHex.trim() : '';
+      if (!isValidSecretKeyHex(privateKeyHex)) {
+        return { success: false, error: 'Corrupted backup: Invalid Ed25519 private key format.' };
+      }
+
+      const derived = derivePublicKeyHexFromSecretKey(privateKeyHex);
+      if (derived.publicKeyHex.toLowerCase() !== v.publicKeyHex.toLowerCase()) {
+        return { success: false, error: 'Corrupted backup: Decrypted private key does not match backup public key.' };
+      }
+      if (derived.fingerprint !== v.fingerprint) {
+        return { success: false, error: 'Corrupted backup: Fingerprint does not match decrypted private key.' };
       }
 
       const recordCount = Array.isArray(backup.history) ? backup.history.length : 0;
       const customerCount = Array.isArray(backup.customers) ? backup.customers.length : 0;
+      const currentVault = await this.storage.getEncryptedVault();
+      const isDifferentAuthority = !!currentVault && currentVault.fingerprint !== v.fingerprint;
 
       const proof: BackupVerificationProof = {
-        proofId: `proof-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        proofId: createProofId(),
         backupFingerprint: v.fingerprint,
         backupPublicKeyHex: v.publicKeyHex,
         recordCount,
@@ -112,6 +182,7 @@ export class MainBackupService {
         proof,
         backupFingerprint: v.fingerprint,
         backupPublicKeyHex: v.publicKeyHex,
+        isDifferentAuthority,
         recordCount,
         customerCount
       };
@@ -137,6 +208,16 @@ export class MainBackupService {
       return {
         success: false,
         error: 'Invalid restoration proof. Staged proof ID mismatch.'
+      };
+    }
+
+    if (
+      this.stagedProof.backupFingerprint !== proof.backupFingerprint ||
+      this.stagedProof.backupPublicKeyHex !== proof.backupPublicKeyHex
+    ) {
+      return {
+        success: false,
+        error: 'Invalid restoration proof. Authority identity mismatch.'
       };
     }
 

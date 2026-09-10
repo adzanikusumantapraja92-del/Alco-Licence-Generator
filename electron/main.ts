@@ -14,6 +14,7 @@ import { MainVaultService } from './services/vault-service';
 import { MainSigningService } from './services/signing-service';
 import { MainBackupService } from './services/backup-service';
 import { registerIpcHandlers } from './ipc/handlers';
+import { isAllowedAppNavigation } from './navigation-security';
 
 let mainWindow: BrowserWindow | null = null;
 let vaultService: MainVaultService | null = null;
@@ -45,15 +46,16 @@ function createWindow(): void {
 
   // Security: Block arbitrary external navigation
   mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
-    const parsed = new URL(navigationUrl);
-    // Only allow localhost dev server or local file
-    if (parsed.protocol !== 'file:' && !parsed.host.startsWith('localhost') && !parsed.host.startsWith('127.0.0.1')) {
+    if (!isAllowedAppNavigation(navigationUrl, !!process.env.VITE_DEV_SERVER_URL)) {
       event.preventDefault();
     }
   });
 
   // Load UI
   if (process.env.VITE_DEV_SERVER_URL) {
+    if (!isAllowedAppNavigation(process.env.VITE_DEV_SERVER_URL, true)) {
+      throw new Error('Refusing to load unapproved development origin.');
+    }
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
     // Production dist loading

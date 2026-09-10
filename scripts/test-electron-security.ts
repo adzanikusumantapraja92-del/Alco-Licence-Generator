@@ -13,6 +13,9 @@ import { MainBackupService } from '../electron/services/backup-service';
 import { IAlcoPersistenceService, OwnerSettings, AlcoBackupPayload } from '../src/modules/persistence/persistence-interface';
 import { EncryptedOwnerVault, AlcoLicenseRecord, AlcoCustomerRecord, AlcoAppDefinition } from '../src/modules/types';
 import { verifyAlcoLicense } from '../src/modules/verification';
+import { generateEd25519KeyPair } from '../src/modules/signing';
+import { encodeRequestCode, decodeRequestCode } from '../src/modules/request-code';
+import { isAllowedAppNavigation } from '../electron/navigation-security';
 
 // In-memory mock storage implementation conforming to IAlcoPersistenceService
 class MockMainStorage implements IAlcoPersistenceService {
@@ -61,6 +64,7 @@ class MockMainStorage implements IAlcoPersistenceService {
   async exportBackupPayload(): Promise<AlcoBackupPayload> {
     if (!this.vault) throw new Error('No vault to backup');
     return {
+      alcoVaultVersion: '2.0-encrypted',
       exportDate: new Date().toISOString(),
       encryptedVault: this.vault,
       history: this.history,
@@ -79,6 +83,12 @@ class MockMainStorage implements IAlcoPersistenceService {
   }
 }
 
+function assertNoPrivateKey(label: string, value: unknown): void {
+  if (JSON.stringify(value).includes('privateKeyHex')) {
+    throw new Error(`${label} leaked privateKeyHex`);
+  }
+}
+
 async function runElectronSecurityTests() {
   console.log('=== RUNNING ALCO ELECTRON SECURITY FOUNDATION TEST SUITE ===');
   let passed = 0;
@@ -91,6 +101,7 @@ async function runElectronSecurityTests() {
   // [01] Initialize Vault in Main Process
   const setupRes = await vaultService.setupVault('MasterPassword123!', 'test-hint');
   if (setupRes.success && setupRes.publicKeyHex && setupRes.fingerprint && !(setupRes as any).privateKeyHex) {
+    assertNoPrivateKey('[01]', setupRes);
     console.log('[01] ✅ PASS: MainVaultService.setupVault returns public metadata and ZERO privateKey');
     passed++;
   } else {
@@ -118,6 +129,7 @@ async function runElectronSecurityTests() {
     features: ['all_modules', 'offline_mode']
   });
   if (genRes.success && genRes.licenseKey && genRes.canonicalString && !(genRes as any).privateKeyHex) {
+    assertNoPrivateKey('[03]', genRes);
     // Verify using standard verifier
     const verifyRes = verifyAlcoLicense({
       licenseKey: genRes.licenseKey,
@@ -174,6 +186,7 @@ async function runElectronSecurityTests() {
   // [06] Unlock Vault with Master Password - verify NO privateKeyHex in return
   const unlockRes = await vaultService.unlockVault('MasterPassword123!');
   if (unlockRes.success && !(unlockRes as any).privateKeyHex && !(unlockRes as any).inMemoryPrivateKeyHex) {
+    assertNoPrivateKey('[06]', unlockRes);
     console.log('[06] ✅ PASS: MainVaultService.unlockVault strictly returns success/metadata, NEVER privateKeyHex');
     passed++;
   } else {
@@ -183,8 +196,8 @@ async function runElectronSecurityTests() {
   // [07] Backup creation in Main Process
   const backupJson = await backupService.exportBackup();
   const valResult = backupService.validateBackup(backupJson);
-  if (valResult.valid && valResult.backup && valResult.backup.encryptedVault) {
-    console.log('[07] ✅ PASS: MainBackupService exports valid encrypted backup JSON');
+  if (valResult.valid && valResult.backup && valResult.backup.alcoVaultVersion === '2.0-encrypted' && valResult.backup.encryptedVault) {
+    console.log('[07] ✅ PASS: MainBackupService exports valid encrypted v2 backup JSON with alcoVaultVersion');
     passed++;
   } else {
     throw new Error('[07] FAIL: exportBackup failed');
@@ -193,6 +206,7 @@ async function runElectronSecurityTests() {
   // [08] Backup verification proof generation (NEVER leaks privateKeyHex)
   const verifyBackupRes = await backupService.verifyBackupDecryption(valResult.backup!, 'MasterPassword123!');
   if (verifyBackupRes.success && verifyBackupRes.proof && !(verifyBackupRes as any).privateKeyHex) {
+    assertNoPrivateKey('[08]', verifyBackupRes);
     console.log('[08] ✅ PASS: MainBackupService.verifyBackupDecryption yields ephemeral proof without privateKeyHex');
     passed++;
   } else {
@@ -206,6 +220,147 @@ async function runElectronSecurityTests() {
     passed++;
   } else {
     throw new Error('[09] FAIL: commitRestore failed');
+  }
+
+  // [10] Backup public key mismatch is rejected before staging
+  const mismatchKey = generateEd25519KeyPair();
+  const pubMismatchBackup: AlcoBackupPayload = {
+    ...valResult.backup!,
+    encryptedVault: {
+      ...valResult.backup!.encryptedVault,
+      publicKeyHex: mismatchKey.publicKeyHex,
+      fingerprint: mismatchKey.fingerprint
+    }
+  };
+  const pubMismatchRes = await backupService.verifyBackupDecryption(pubMismatchBackup, 'MasterPassword123!');
+  if (!pubMismatchRes.success && pubMismatchRes.error?.includes('does not match')) {
+    console.log('[10] ✅ PASS: Backup with decrypted private/public key mismatch is rejected');
+    passed++;
+  } else {
+    throw new Error('[10] FAIL: Public key mismatch backup was accepted');
+  }
+
+  // [11] Backup fingerprint mismatch is rejected
+  const fpMismatchBackup: AlcoBackupPayload = {
+    ...valResult.backup!,
+    encryptedVault: {
+      ...valResult.backup!.encryptedVault,
+      fingerprint: 'DEADBEEF...BADF00D'
+    }
+  };
+  const fpMismatchRes = await backupService.verifyBackupDecryption(fpMismatchBackup, 'MasterPassword123!');
+  if (!fpMismatchRes.success && fpMismatchRes.error?.includes('Fingerprint')) {
+    console.log('[11] ✅ PASS: Backup with fingerprint mismatch is rejected');
+    passed++;
+  } else {
+    throw new Error('[11] FAIL: Fingerprint mismatch backup was accepted');
+  }
+
+  // [12] Customers survive export and restore
+  const customerRecord: AlcoCustomerRecord = {
+    customerId: 'CUST-ALCO-8FA4D2C1',
+    name: 'Owner Example',
+    email: 'Owner@Example.com',
+    emailNormalized: 'owner@example.com',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  await storage.saveCustomerRegistry([customerRecord]);
+  const customerBackup = backupService.validateBackup(await backupService.exportBackup()).backup!;
+  await storage.saveCustomerRegistry([]);
+  const customerVerify = await backupService.verifyBackupDecryption(customerBackup, 'MasterPassword123!');
+  if (!customerVerify.success || !customerVerify.proof) throw new Error('[12] FAIL: Customer backup verification failed');
+  const customerRestore = await backupService.commitRestore(customerVerify.proof);
+  const restoredCustomers = await storage.getCustomerRegistry();
+  if (customerRestore.success && restoredCustomers[0]?.emailNormalized === 'owner@example.com') {
+    console.log('[12] ✅ PASS: Customer registry survives Electron backup export/restore');
+    passed++;
+  } else {
+    throw new Error('[12] FAIL: Customer registry was not restored');
+  }
+
+  // [13] Valid old encrypted v2 backup without customers is still accepted
+  const oldV2Backup = { ...customerBackup };
+  delete (oldV2Backup as Partial<AlcoBackupPayload>).customers;
+  const oldV2Verify = await backupService.verifyBackupDecryption(oldV2Backup as AlcoBackupPayload, 'MasterPassword123!');
+  if (oldV2Verify.success && oldV2Verify.proof) {
+    console.log('[13] ✅ PASS: Existing encrypted v2 backup without customers remains compatible');
+    passed++;
+  } else {
+    throw new Error(`[13] FAIL: Old v2 backup without customers rejected: ${oldV2Verify.error}`);
+  }
+
+  // [14] Main signing writes generated records to Main persistence
+  await signingService.generateLicense({
+    appId: 'alco-pro',
+    deviceId: 'ALCO-DEV-7A9B-4C2E-8F1D',
+    customerId: 'CUST-ALCO-8FA4D2C1',
+    customerName: 'Owner Example',
+    plan: 'pro',
+    licenseType: 'subscription',
+    expiresAt: '2099-01-01',
+    features: ['offline_mode']
+  });
+  if ((await storage.getLicenseHistory()).length > 0) {
+    console.log('[14] ✅ PASS: Electron license history is persisted through Main storage');
+    passed++;
+  } else {
+    throw new Error('[14] FAIL: Electron signing did not persist history through Main storage');
+  }
+
+  // [15] Request Code v1/v2 format remains decodable
+  const v1Code = encodeRequestCode({
+    version: '1.0',
+    requestId: 'REQ-OLD-1',
+    appId: 'alco-pro',
+    deviceId: 'ALCO-DEV-7A9B-4C2E-8F1D',
+    customerId: 'CUST-ALCO-1001',
+    timestamp: '2026-01-01T00:00:00.000Z'
+  });
+  const v2Code = encodeRequestCode({
+    version: '2.0',
+    requestId: 'REQ-NEW-1',
+    appId: 'alco-pro',
+    deviceId: 'ALCO-DEV-7A9B-4C2E-8F1D',
+    customerName: 'Owner Example',
+    customerEmail: 'Owner@Example.com',
+    timestamp: '2026-01-01T00:00:00.000Z'
+  });
+  if (decodeRequestCode(v1Code).success && decodeRequestCode(v2Code).success) {
+    console.log('[15] ✅ PASS: Request Code v1/v2 encode/decode remains compatible');
+    passed++;
+  } else {
+    throw new Error('[15] FAIL: Request Code v1/v2 compatibility regressed');
+  }
+
+  // [16] Navigation allowlist rejects hostname-prefix bypass
+  if (!isAllowedAppNavigation('http://localhost.evil.example:3000', true)) {
+    console.log('[16] ✅ PASS: Navigation allowlist rejects localhost.evil.example');
+    passed++;
+  } else {
+    throw new Error('[16] FAIL: Navigation allowlist accepted localhost.evil.example');
+  }
+
+  // [17] Browser fallback still initializes and exposes no private key
+  const memoryStorage = new Map<string, string>();
+  (globalThis as any).window = {};
+  (globalThis as any).localStorage = {
+    getItem: (key: string) => memoryStorage.get(key) ?? null,
+    setItem: (key: string, value: string) => memoryStorage.set(key, value),
+    removeItem: (key: string) => memoryStorage.delete(key)
+  };
+  const { getAuthorityClient } = await import('../src/modules/authority-client');
+  const browserAuthority = getAuthorityClient();
+  const browserSetup = await browserAuthority.setupVault({ masterPassword: 'BrowserPassword123!' });
+  const browserUnlock = await browserAuthority.unlockVault({ masterPassword: 'BrowserPassword123!' });
+  const browserBackup = await browserAuthority.exportBackup();
+  assertNoPrivateKey('[17 setup]', browserSetup);
+  assertNoPrivateKey('[17 unlock]', browserUnlock);
+  if (browserSetup.success && browserUnlock.success && JSON.parse(browserBackup).alcoVaultVersion === '2.0-encrypted') {
+    console.log('[17] ✅ PASS: Browser fallback remains functional without renderer-facing privateKeyHex');
+    passed++;
+  } else {
+    throw new Error('[17] FAIL: Browser fallback failed');
   }
 
   console.log(`=== ALL ELECTRON SECURITY TESTS PASSED: ${passed}/${passed} ===`);

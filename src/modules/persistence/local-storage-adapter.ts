@@ -174,6 +174,7 @@ export class LocalStoragePersistenceAdapter implements IAlcoPersistenceService {
     const customApps = await this.getCustomApps();
 
     return {
+      alcoVaultVersion: '2.0-encrypted',
       exportDate: new Date().toISOString(),
       encryptedVault: vault,
       history,

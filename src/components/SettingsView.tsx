@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   Settings, 
   KeyRound, 
@@ -18,19 +18,9 @@ import {
   FileCheck
 } from 'lucide-react';
 import { OwnerKeyPair, VaultStatus } from '../modules/types';
-import { 
-  exportVaultBackup, 
-  getEncryptedVault, 
-  changeVaultMasterPassword, 
-  rotateOwnerKeyPair,
-  validateBackupFileFormat,
-  verifyBackupDecryption,
-  commitRestoreBackup,
-  cancelStagedRestore,
-  AlcoBackupPayload,
-  BackupVerificationResult,
-  BackupVerificationProof
-} from '../modules/storage';
+import { AlcoBackupPayload } from '../modules/persistence/persistence-interface';
+import { BackupVerificationResult, BackupVerificationProof } from '../../electron/types';
+import { authorityClient } from '../modules/authority-client';
 import { CLIENT_VERIFICATION_SNIPPET } from '../modules/verification';
 import { ELECTRON_DEVICE_FINGERPRINT_SNIPPET } from '../modules/device-fingerprint';
 
@@ -79,8 +69,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [isRotating, setIsRotating] = useState<boolean>(false);
 
   const [activeCodeTab, setActiveCodeTab] = useState<'verification' | 'fingerprint'>('verification');
+  const [vaultHint, setVaultHint] = useState<string | undefined>(undefined);
 
-  const vault = getEncryptedVault();
+  useEffect(() => {
+    authorityClient.getVaultStatus().then((status) => {
+      setVaultHint(status.vaultHint);
+    });
+  }, [vaultStatus]);
 
   const handleCopy = (text: string, label: string) => {
     navigator.clipboard.writeText(text);
@@ -88,8 +83,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  const handleDownloadBackup = () => {
-    const backupStr = exportVaultBackup();
+  const handleDownloadBackup = async () => {
+    const backupStr = await authorityClient.exportBackup();
     const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(backupStr);
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute('href', dataStr);
@@ -116,7 +111,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setIsChangingPassword(true);
 
     try {
-      await changeVaultMasterPassword(currentPassword, newPassword, passwordHint || undefined);
+      const res = await authorityClient.changePassword({
+        currentPassword,
+        newPassword,
+        vaultHint: passwordHint || undefined
+      });
+      if (!res.success) {
+        throw new Error(res.error || 'Failed to change password.');
+      }
       setPasswordChangeStatus({ success: true, message: 'Master Password successfully changed. Vault re-encrypted with fresh salt and IV.' });
       setCurrentPassword('');
       setNewPassword('');
@@ -131,7 +133,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   // Stage 1: Validate Backup Format
-  const handleValidateBackup = () => {
+  const handleValidateBackup = async () => {
     setRestoreError(null);
     setRestoreSuccessMessage(null);
     setVerificationResult(null);
@@ -141,7 +143,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       return;
     }
 
-    const validation = validateBackupFileFormat(importJson);
+    const validation = await authorityClient.validateBackup(importJson);
     if (!validation.valid || !validation.backup) {
       setRestoreError(validation.error || 'Invalid backup structure.');
       return;
@@ -165,7 +167,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setRestoreError(null);
 
     try {
-      const res = await verifyBackupDecryption(validatedBackup, restorePassword);
+      const res = await authorityClient.verifyBackupDecryption(validatedBackup, restorePassword);
       if (!res.success) {
         setRestoreError(res.error || 'Failed to decrypt backup.');
         return;
@@ -189,9 +191,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   // Stage 3: Commit Restore
-  const handleCommitRestore = (proof: BackupVerificationProof) => {
+  const handleCommitRestore = async (proof: BackupVerificationProof) => {
     setRestoreError(null);
-    const res = commitRestoreBackup(proof);
+    const res = await authorityClient.commitRestoreBackup(proof);
     if (res.success) {
       setRestoreSuccessMessage(res.message);
       setRestoreStep('success');
@@ -201,12 +203,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       onLockVault();
       onRefreshData();
     } else {
-      setRestoreError(res.message);
+      setRestoreError(res.error || res.message || 'Restore failed.');
     }
   };
 
-  const handleResetRestore = () => {
-    cancelStagedRestore();
+  const handleResetRestore = async () => {
+    await authorityClient.cancelStagedRestore();
     setRestoreStep('idle');
     setValidatedBackup(null);
     setRestorePassword('');
@@ -218,19 +220,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleExecuteKeyRotation = async (e: React.FormEvent) => {
     e.preventDefault();
     setRotateStatus(null);
-    setIsRotating(true);
-
-    try {
-      await rotateOwnerKeyPair(rotatePassword);
-      setRotateStatus({ success: true, message: 'Owner Ed25519 Key Pair rotated successfully. Note that previous client builds must be updated with the new public key.' });
-      setRotatePassword('');
-      setShowRotateConfirm(false);
-      onRefreshData();
-    } catch (err: any) {
-      setRotateStatus({ success: false, message: err?.message || 'Incorrect password for key rotation.' });
-    } finally {
-      setIsRotating(false);
-    }
+    setIsRotating(false);
+    setRotateStatus({ success: false, message: 'Key rotation is disabled in this Electron foundation until a Main Process rotation flow is implemented.' });
   };
 
   return (
@@ -325,10 +316,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </div>
               )}
 
-              {vault?.vaultHint && (
+              {vaultHint && (
                 <div className="p-3 rounded-lg bg-slate-950 border border-slate-850 text-slate-400">
                   <span className="text-slate-500 block text-[11px]">Vault Password Hint:</span>
-                  <span className="text-slate-300 italic">{vault.vaultHint}</span>
+                  <span className="text-slate-300 italic">{vaultHint}</span>
                 </div>
               )}
             </div>
@@ -446,11 +437,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {!showRotateConfirm ? (
                 <button
                   onClick={() => setShowRotateConfirm(true)}
-                  disabled={vaultStatus !== 'unlocked'}
+                  disabled
                   className="w-full py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-amber-300 hover:bg-amber-950/20 border border-slate-800 hover:border-amber-800/40 flex items-center justify-center gap-1.5 transition disabled:opacity-40"
                 >
                   <RotateCw className="w-3.5 h-3.5" />
-                  <span>Rotate Owner Key Pair...</span>
+                  <span>Key Rotation Disabled</span>
                 </button>
               ) : (
                 <form onSubmit={handleExecuteKeyRotation} className="p-3.5 rounded-lg bg-amber-950/20 border border-amber-900/60 space-y-3">

@@ -29,14 +29,7 @@ import {
   VaultStatus 
 } from '../modules/types';
 import { decodeRequestCode, generateSampleRequestCode } from '../modules/request-code';
-import { createLicensePayload } from '../modules/license-payload';
-import { signCanonicalPayload, packageLicenseKey } from '../modules/signing';
 import { generateMockDeviceId } from '../modules/device-fingerprint';
-import {
-  findCustomerByEmail,
-  getLicensesForCustomer,
-  upsertCustomerFromRequest,
-} from '../modules/customer-registry';
 import { authorityClient } from '../modules/authority-client';
 
 interface DashboardViewProps {
@@ -117,7 +110,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   }, [selectedAppId, plan]);
 
   // Handle Request Code decoding
-  const handleDecodeRequest = (raw: string) => {
+  const handleDecodeRequest = async (raw: string) => {
     const trimmed = raw.trim();
     if (!trimmed) {
       setDecodeStatus({ success: null });
@@ -130,13 +123,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       let registryMessage = '';
 
       if (res.data.version === '2.0') {
-        const existing = findCustomerByEmail(res.data.customerEmail || '');
+        const normalizedEmail = (res.data.customerEmail || '').trim().toLowerCase();
+        const customers = await authorityClient.getCustomers();
+        const existing = customers.find(customer => customer.emailNormalized === normalizedEmail);
         if (existing) {
-          const licenses = getLicensesForCustomer(existing.customerId);
+          const history = await authorityClient.getHistory();
+          const licenses = history.filter(record => record.payload.customerId === existing.customerId);
           resolvedCustomerId = existing.customerId;
           registryMessage = `EXISTING CUSTOMER: ${existing.customerId} (${licenses.length} existing ALCO license${licenses.length === 1 ? '' : 's'})`;
         } else {
-          const created = upsertCustomerFromRequest({
+          const created = await authorityClient.upsertCustomer({
             name: res.data.customerName || '',
             email: res.data.customerEmail || '',
           });
@@ -169,7 +165,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const handleLoadSampleRequest = () => {
     const sample = generateSampleRequestCode(selectedAppId);
     setRequestCodeInput(sample);
-    handleDecodeRequest(sample);
+    void handleDecodeRequest(sample);
   };
 
   // Quick expiration presets
@@ -369,7 +365,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 value={requestCodeInput}
                 onChange={(e) => {
                   setRequestCodeInput(e.target.value);
-                  handleDecodeRequest(e.target.value);
+                  void handleDecodeRequest(e.target.value);
                 }}
                 placeholder="ALCO-REQ-v1.eyJ2IjoiMS4wIiwiYXBwIjoiYWxjby1jb250ZW50LWVuZ2luZSIsImRldiI6... or paste JSON"
                 className="w-full px-3.5 py-2.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 text-xs font-mono focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition resize-none"

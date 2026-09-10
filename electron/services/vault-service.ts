@@ -5,12 +5,12 @@
  * - Owns the decrypted Ed25519 private key in Main Process memory only.
  * - Private key is strictly isolated in volatile RAM.
  * - Never returns privateKeyHex through IPC methods.
- * - Cleanses/zeroizes key on lock or application shutdown.
+ * - Clears JavaScript references on lock or application shutdown.
  */
 
 import { EncryptedOwnerVault, VaultStatus } from '../../src/modules/types';
 import { encryptWithPassword, decryptWithPassword } from '../../src/modules/vault-crypto';
-import { generateEd25519KeyPair } from '../../src/modules/signing';
+import { derivePublicKeyHexFromSecretKey, generateEd25519KeyPair, isValidSecretKeyHex } from '../../src/modules/signing';
 import { ElectronFileStorageService } from './storage-service';
 import { 
   VaultStatusResult, 
@@ -27,6 +27,27 @@ export class MainVaultService {
 
   constructor(storage: ElectronFileStorageService) {
     this.storage = storage;
+  }
+
+  private validateSecretMatchesVault(secretPayload: any, vault: EncryptedOwnerVault): string {
+    const privateKeyHex = typeof secretPayload?.privateKeyHex === 'string'
+      ? secretPayload.privateKeyHex.trim()
+      : '';
+
+    if (!isValidSecretKeyHex(privateKeyHex)) {
+      throw new Error('Corrupted vault: Invalid Ed25519 private key format.');
+    }
+
+    const derived = derivePublicKeyHexFromSecretKey(privateKeyHex);
+    if (derived.publicKeyHex.toLowerCase() !== vault.publicKeyHex.toLowerCase()) {
+      throw new Error('Corrupted vault: Private key does not match stored public key.');
+    }
+
+    if (derived.fingerprint !== vault.fingerprint) {
+      throw new Error('Corrupted vault: Authority fingerprint does not match derived public key.');
+    }
+
+    return privateKeyHex;
   }
 
   isUnlocked(): boolean {
@@ -136,11 +157,9 @@ export class MainVaultService {
       );
 
       const secretPayload = JSON.parse(decryptedJson);
-      if (!secretPayload.privateKeyHex) {
-        throw new Error('Corrupted vault: Missing privateKeyHex in decrypted payload.');
-      }
+      const privateKeyHex = this.validateSecretMatchesVault(secretPayload, vault);
 
-      this.inMemoryPrivateKeyHex = secretPayload.privateKeyHex;
+      this.inMemoryPrivateKeyHex = privateKeyHex;
       this.inMemoryFingerprint = vault.fingerprint;
 
       return {
@@ -161,7 +180,7 @@ export class MainVaultService {
   }
 
   async lockVault(): Promise<VaultLockResult> {
-    // Explicitly zeroize / release private key from RAM
+    // Release JavaScript references to the active private key.
     this.inMemoryPrivateKeyHex = null;
     this.inMemoryFingerprint = null;
     return { success: true };
@@ -193,6 +212,7 @@ export class MainVaultService {
       );
 
       const secretPayload = JSON.parse(decryptedJson);
+      const privateKeyHex = this.validateSecretMatchesVault(secretPayload, vault);
 
       const newEncrypted = await encryptWithPassword(decryptedJson, newPassword);
 
@@ -209,7 +229,7 @@ export class MainVaultService {
       await this.storage.saveEncryptedVault(updatedVault);
 
       if (this.isUnlocked()) {
-        this.inMemoryPrivateKeyHex = secretPayload.privateKeyHex;
+        this.inMemoryPrivateKeyHex = privateKeyHex;
       }
 
       return { success: true };

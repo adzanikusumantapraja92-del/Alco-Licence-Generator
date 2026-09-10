@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
-import { ShieldAlert, Lock, KeyRound, Check, AlertTriangle, Eye, EyeOff, Sparkles } from 'lucide-react';
+import { ShieldAlert, Lock, KeyRound, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { authorityClient } from '../modules/authority-client';
-import { getLegacyPlaintextKeyPair } from '../modules/storage';
 
 interface VaultSetupModalProps {
   isOpen: boolean;
@@ -18,8 +17,6 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const legacyKey = getLegacyPlaintextKeyPair();
 
   if (!isOpen) return null;
 
@@ -92,15 +89,6 @@ export const VaultSetupModal: React.FC<VaultSetupModalProps> = ({
             "Jika private key dan backup hilang, lisensi baru tidak dapat ditandatangani menggunakan identitas ALCO lama."
           </div>
         </div>
-
-        {legacyKey && (
-          <div className="p-3 rounded-lg bg-indigo-950/40 border border-indigo-800/60 text-xs text-indigo-200 flex items-start gap-2">
-            <Sparkles className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
-            <div>
-              <span className="font-semibold">Preserving Existing Identity:</span> Your existing Ed25519 authority key ({legacyKey.fingerprint}) will be safely encrypted into the new vault. All client applications will remain 100% compatible.
-            </div>
-          </div>
-        )}
 
         <form onSubmit={handleSetup} className="space-y-4">
           <div className="space-y-1.5">

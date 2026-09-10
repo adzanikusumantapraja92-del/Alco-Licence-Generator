@@ -33,6 +33,7 @@ export const DEFAULT_OWNER_SETTINGS: OwnerSettings = {
 };
 
 export interface AlcoBackupPayload {
+  alcoVaultVersion: '2.0-encrypted';
   exportDate: string;
   encryptedVault: EncryptedOwnerVault;
   history?: AlcoLicenseRecord[];

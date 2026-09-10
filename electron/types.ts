@@ -151,6 +151,7 @@ export interface BackupVerificationResult {
   error?: string;
   backupPublicKeyHex?: string;
   backupFingerprint?: string;
+  isDifferentAuthority?: boolean;
   recordCount?: number;
   customerCount?: number;
 }
