@@ -9,7 +9,7 @@
  * - Application Registry and Settings
  */
 
-import { EncryptedOwnerVault, AlcoLicenseRecord, OwnerKeyPair } from './types';
+import { EncryptedOwnerVault, AlcoLicenseRecord, OwnerKeyPair, AlcoCustomerRecord } from './types';
 import { encryptWithPassword, decryptWithPassword } from './vault-crypto';
 import { 
   generateEd25519KeyPair, 
@@ -369,6 +369,8 @@ export function exportVaultBackup(): string {
   const encryptedVault = getEncryptedVault();
   const history = getLicenseHistory();
   const settings = getOwnerSettings();
+  const customersRaw = localStorage.getItem(STORAGE_KEYS.CUSTOMERS);
+  const customers = customersRaw ? JSON.parse(customersRaw) : [];
   const customAppsRaw = localStorage.getItem(STORAGE_KEYS.CUSTOM_APPS);
   const customApps = customAppsRaw ? JSON.parse(customAppsRaw) : [];
 
@@ -377,6 +379,7 @@ export function exportVaultBackup(): string {
     exportDate: new Date().toISOString(),
     encryptedVault, // Contains ciphertext, salt, IV, and public key only
     history,
+    customers,
     settings,
     customApps
   };
@@ -389,6 +392,7 @@ export interface AlcoBackupPayload {
   exportDate: string;
   encryptedVault: EncryptedOwnerVault;
   history?: AlcoLicenseRecord[];
+  customers?: AlcoCustomerRecord[];
   settings?: OwnerSettings;
   customApps?: any[];
 }
@@ -430,6 +434,76 @@ interface StagedBackupEntry {
 }
 
 let stagedVerifiedBackup: StagedBackupEntry | null = null;
+
+function isValidIsoDateString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && !Number.isNaN(Date.parse(value));
+}
+
+function validateCustomerRegistryPayload(customers: unknown): { valid: boolean; error?: string } {
+  if (customers === undefined) {
+    return { valid: true };
+  }
+
+  if (!Array.isArray(customers)) {
+    return { valid: false, error: 'Invalid backup: customers must be an array when provided.' };
+  }
+
+  const seenEmails = new Set<string>();
+  const seenIds = new Set<string>();
+
+  for (let i = 0; i < customers.length; i++) {
+    const customer = customers[i] as Record<string, unknown>;
+    if (!customer || typeof customer !== 'object' || Array.isArray(customer)) {
+      return { valid: false, error: `Invalid customer registry item at index ${i}: must be an object.` };
+    }
+
+    if (typeof customer.customerId !== 'string' || !customer.customerId.trim() || customer.customerId.length > 100) {
+      return { valid: false, error: `Invalid customer registry item at index ${i}: customerId must be a non-empty string up to 100 characters.` };
+    }
+    if (typeof customer.name !== 'string' || !customer.name.trim() || customer.name.length > 200) {
+      return { valid: false, error: `Invalid customer registry item at index ${i}: name must be a non-empty string up to 200 characters.` };
+    }
+    if (typeof customer.email !== 'string' || !customer.email.trim() || customer.email.length > 254) {
+      return { valid: false, error: `Invalid customer registry item at index ${i}: email must be a non-empty string up to 254 characters.` };
+    }
+    if (typeof customer.emailNormalized !== 'string' || !customer.emailNormalized.trim() || customer.emailNormalized.length > 254) {
+      return { valid: false, error: `Invalid customer registry item at index ${i}: emailNormalized must be a non-empty string up to 254 characters.` };
+    }
+
+    const normalized = customer.email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+      return { valid: false, error: `Invalid customer registry item at index ${i}: email format is invalid.` };
+    }
+    if (customer.emailNormalized !== normalized) {
+      return { valid: false, error: `Invalid customer registry item at index ${i}: emailNormalized must match normalized email.` };
+    }
+    if (seenEmails.has(normalized)) {
+      return { valid: false, error: `Invalid customer registry: duplicate normalized email "${normalized}".` };
+    }
+    if (seenIds.has(customer.customerId)) {
+      return { valid: false, error: `Invalid customer registry: duplicate customerId "${customer.customerId}".` };
+    }
+    seenEmails.add(normalized);
+    seenIds.add(customer.customerId);
+
+    if (!isValidIsoDateString(customer.createdAt) || !isValidIsoDateString(customer.updatedAt)) {
+      return { valid: false, error: `Invalid customer registry item at index ${i}: createdAt and updatedAt must be valid date strings.` };
+    }
+
+    const optionalStringFields = ['whatsapp', 'segment', 'acquisitionSource'];
+    for (const field of optionalStringFields) {
+      if (customer[field] !== undefined && typeof customer[field] !== 'string') {
+        return { valid: false, error: `Invalid customer registry item at index ${i}: ${field} must be a string when provided.` };
+      }
+    }
+
+    if (customer.marketingConsent !== undefined && typeof customer.marketingConsent !== 'boolean') {
+      return { valid: false, error: `Invalid customer registry item at index ${i}: marketingConsent must be boolean when provided.` };
+    }
+  }
+
+  return { valid: true };
+}
 
 /**
  * Explicitly cancels and clears any staged verified backup in volatile memory
@@ -486,6 +560,11 @@ export function validateBackupFileFormat(jsonString: string): BackupValidationRe
 
     if (!v.fingerprint || typeof v.fingerprint !== 'string') {
       return { valid: false, error: 'Corrupted backup: Missing public key fingerprint.' };
+    }
+
+    const customerValidation = validateCustomerRegistryPayload(raw.customers);
+    if (!customerValidation.valid) {
+      return { valid: false, error: customerValidation.error };
     }
 
     return {
@@ -631,6 +710,9 @@ export function commitRestoreBackup(proof: BackupVerificationProof): { success: 
 
     if (Array.isArray(verifiedBackup.history)) {
       localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(verifiedBackup.history));
+    }
+    if (Array.isArray(verifiedBackup.customers)) {
+      localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(verifiedBackup.customers));
     }
     if (verifiedBackup.settings) {
       localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(verifiedBackup.settings));
