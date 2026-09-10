@@ -102,7 +102,7 @@ export function encodeRequestCode(payload: AlcoRequestCodePayload): string {
 
   const b64 = toBase64Url(json);
   const chk = calculateChecksum(b64);
-  return `ALCO-REQ-v1.${b64}.${chk}`;
+  return `ALCO-REQ-${isV2 ? 'v2' : 'v1'}.${b64}.${chk}`;
 }
 
 export interface RequestDecodeResult {
