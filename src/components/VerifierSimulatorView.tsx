@@ -194,7 +194,7 @@ export const VerifierSimulatorView: React.FC<VerifierSimulatorViewProps> = ({
             <div className="pt-2 border-t border-slate-850 text-xs space-y-1">
               <span className="text-slate-400 block font-medium">Embedded Owner Public Key (in Client Code):</span>
               <code className="text-[10px] text-indigo-300/80 font-mono break-all block p-2 bg-slate-950 rounded border border-slate-800">
-                {keyPair.publicKeyHex}
+                {keyPair?.publicKeyHex || 'Vault Uninitialized (No Public Key)'}
               </code>
             </div>
 

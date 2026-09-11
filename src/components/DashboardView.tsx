@@ -947,7 +947,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <span>Authority Vault Key:</span>
                 </span>
                 <span className="font-mono text-indigo-300 text-[10px]">
-                  {keyPair.fingerprint}
+                  {keyPair ? keyPair.fingerprint : 'Vault Uninitialized'}
                 </span>
               </div>
               <p className="text-[10px] text-slate-500">
