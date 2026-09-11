@@ -68,6 +68,16 @@ export class ElectronFileStorageService implements IAlcoPersistenceService {
     fs.renameSync(tempPath, filePath);
   }
 
+  private safeDelete(filePath: string): void {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  }
+
+  storageDomainExists(domain: 'vault' | 'customers' | 'history' | 'settings' | 'customApps'): boolean {
+    return fs.existsSync(this.files[domain]);
+  }
+
   async hasOwnerVault(): Promise<boolean> {
     const vault = await this.getEncryptedVault();
     return !!(vault && vault.ciphertextHex && vault.publicKeyHex && vault.saltHex && vault.ivHex);
@@ -79,6 +89,10 @@ export class ElectronFileStorageService implements IAlcoPersistenceService {
 
   async saveEncryptedVault(vault: EncryptedOwnerVault): Promise<void> {
     this.safeWriteJson(this.files.vault, vault);
+  }
+
+  async deleteEncryptedVault(): Promise<void> {
+    this.safeDelete(this.files.vault);
   }
 
   async getOwnerPublicMeta(): Promise<OwnerKeyPair | null> {
@@ -100,6 +114,10 @@ export class ElectronFileStorageService implements IAlcoPersistenceService {
     this.safeWriteJson(this.files.customers, customers);
   }
 
+  async deleteCustomerRegistry(): Promise<void> {
+    this.safeDelete(this.files.customers);
+  }
+
   async getLicenseHistory(): Promise<AlcoLicenseRecord[]> {
     const list = this.safeReadJson<AlcoLicenseRecord[]>(this.files.history, []);
     return Array.isArray(list) ? list : [];
@@ -107,6 +125,10 @@ export class ElectronFileStorageService implements IAlcoPersistenceService {
 
   async saveLicenseHistory(history: AlcoLicenseRecord[]): Promise<void> {
     this.safeWriteJson(this.files.history, history);
+  }
+
+  async deleteLicenseHistory(): Promise<void> {
+    this.safeDelete(this.files.history);
   }
 
   async appendLicenseRecord(record: AlcoLicenseRecord): Promise<void> {
@@ -135,6 +157,10 @@ export class ElectronFileStorageService implements IAlcoPersistenceService {
     this.safeWriteJson(this.files.settings, settings);
   }
 
+  async deleteOwnerSettings(): Promise<void> {
+    this.safeDelete(this.files.settings);
+  }
+
   async getCustomApps(): Promise<AlcoAppDefinition[]> {
     const list = this.safeReadJson<AlcoAppDefinition[]>(this.files.customApps, []);
     return Array.isArray(list) ? list : [];
@@ -142,6 +168,10 @@ export class ElectronFileStorageService implements IAlcoPersistenceService {
 
   async saveCustomApps(apps: AlcoAppDefinition[]): Promise<void> {
     this.safeWriteJson(this.files.customApps, apps);
+  }
+
+  async deleteCustomApps(): Promise<void> {
+    this.safeDelete(this.files.customApps);
   }
 
   async exportBackupPayload(): Promise<AlcoBackupPayload> {

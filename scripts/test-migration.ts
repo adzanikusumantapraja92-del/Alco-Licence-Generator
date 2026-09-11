@@ -15,6 +15,8 @@ import { IAlcoPersistenceService, OwnerSettings, AlcoBackupPayload } from '../sr
 import { EncryptedOwnerVault, AlcoLicenseRecord, AlcoCustomerRecord, AlcoAppDefinition } from '../src/modules/types';
 import { generateEd25519KeyPair, derivePublicKeyHexFromSecretKey } from '../src/modules/signing';
 import { encryptWithPassword } from '../src/modules/vault-crypto';
+import { MainSigningService } from '../electron/services/signing-service';
+import fs from 'node:fs';
 
 // In-memory mock persistence conforming to IAlcoPersistenceService
 class MockMigrationStorage implements IAlcoPersistenceService {
@@ -22,6 +24,16 @@ class MockMigrationStorage implements IAlcoPersistenceService {
   public history: AlcoLicenseRecord[] = [];
   public customers: AlcoCustomerRecord[] = [];
   public apps: AlcoAppDefinition[] = [];
+  public existed = {
+    vault: false,
+    customers: false,
+    history: false,
+    settings: false,
+    customApps: false
+  };
+  public tamperVaultAfterRestore = false;
+  public failCustomerReadAfterRestore = false;
+  private restoredOnce = false;
   public settings: OwnerSettings = {
     ownerName: 'Aladzan Corpora Owner',
     defaultPlan: 'pro',
@@ -32,8 +44,17 @@ class MockMigrationStorage implements IAlcoPersistenceService {
   };
 
   async hasOwnerVault() { return this.vault !== null; }
-  async getEncryptedVault() { return this.vault; }
-  async saveEncryptedVault(v: EncryptedOwnerVault) { this.vault = JSON.parse(JSON.stringify(v)); }
+  storageDomainExists(domain: keyof MockMigrationStorage['existed']) { return this.existed[domain]; }
+  async getEncryptedVault() {
+    if (this.tamperVaultAfterRestore && this.restoredOnce && this.vault) {
+      return { ...this.vault, fingerprint: 'TAMPERED-AFTER-WRITE' };
+    }
+    return this.vault;
+  }
+  async saveEncryptedVault(v: EncryptedOwnerVault) {
+    this.vault = JSON.parse(JSON.stringify(v));
+    this.existed.vault = true;
+  }
   async getOwnerPublicMeta() {
     if (!this.vault) return null;
     return {
@@ -42,10 +63,23 @@ class MockMigrationStorage implements IAlcoPersistenceService {
       createdAt: this.vault.createdAt
     };
   }
-  async deleteEncryptedVault() { this.vault = null; }
+  async deleteEncryptedVault() {
+    this.vault = null;
+    this.existed.vault = false;
+  }
   async getLicenseHistory() { return this.history; }
-  async saveLicenseHistory(h: AlcoLicenseRecord[]) { this.history = JSON.parse(JSON.stringify(h)); }
-  async appendLicenseRecord(r: AlcoLicenseRecord) { this.history.push(r); }
+  async saveLicenseHistory(h: AlcoLicenseRecord[]) {
+    this.history = JSON.parse(JSON.stringify(h));
+    this.existed.history = true;
+  }
+  async deleteLicenseHistory() {
+    this.history = [];
+    this.existed.history = false;
+  }
+  async appendLicenseRecord(r: AlcoLicenseRecord) {
+    this.history.push(r);
+    this.existed.history = true;
+  }
   async updateLicenseStatus(id: string, s: 'active' | 'revoked') {
     const idx = this.history.findIndex(x => x.id === id);
     if (idx >= 0) this.history[idx].status = s;
@@ -53,12 +87,46 @@ class MockMigrationStorage implements IAlcoPersistenceService {
   async deleteLicenseRecord(id: string) {
     this.history = this.history.filter(x => x.id !== id);
   }
-  async getCustomerRegistry() { return this.customers; }
-  async saveCustomerRegistry(c: AlcoCustomerRecord[]) { this.customers = JSON.parse(JSON.stringify(c)); }
+  async getCustomerRegistry() {
+    if (this.failCustomerReadAfterRestore && this.restoredOnce) {
+      this.failCustomerReadAfterRestore = false;
+      throw new Error('Simulated diagnostics customer read failure after unlock');
+    }
+    return this.customers;
+  }
+  async saveCustomerRegistry(c: AlcoCustomerRecord[]) {
+    this.customers = JSON.parse(JSON.stringify(c));
+    this.existed.customers = true;
+  }
+  async deleteCustomerRegistry() {
+    this.customers = [];
+    this.existed.customers = false;
+  }
   async getCustomApps() { return this.apps; }
-  async saveCustomApps(a: AlcoAppDefinition[]) { this.apps = JSON.parse(JSON.stringify(a)); }
+  async saveCustomApps(a: AlcoAppDefinition[]) {
+    this.apps = JSON.parse(JSON.stringify(a));
+    this.existed.customApps = true;
+  }
+  async deleteCustomApps() {
+    this.apps = [];
+    this.existed.customApps = false;
+  }
   async getOwnerSettings() { return this.settings; }
-  async saveOwnerSettings(s: OwnerSettings) { this.settings = JSON.parse(JSON.stringify(s)); }
+  async saveOwnerSettings(s: OwnerSettings) {
+    this.settings = JSON.parse(JSON.stringify(s));
+    this.existed.settings = true;
+  }
+  async deleteOwnerSettings() {
+    this.settings = {
+      ownerName: 'Aladzan Corpora Owner',
+      defaultPlan: 'pro',
+      defaultLicenseType: 'subscription',
+      defaultSubscriptionDays: 365,
+      autoSaveHistory: true,
+      autoLockMinutes: 15
+    };
+    this.existed.settings = false;
+  }
 
   async exportBackupPayload(): Promise<AlcoBackupPayload> {
     if (!this.vault) throw new Error('Cannot export backup: Vault not initialized');
@@ -76,10 +144,24 @@ class MockMigrationStorage implements IAlcoPersistenceService {
   async restoreFromBackupPayload(payload: AlcoBackupPayload): Promise<void> {
     if (!payload.encryptedVault) throw new Error('Corrupted backup');
     this.vault = JSON.parse(JSON.stringify(payload.encryptedVault));
-    if (Array.isArray(payload.customers)) this.customers = JSON.parse(JSON.stringify(payload.customers));
-    if (Array.isArray(payload.history)) this.history = JSON.parse(JSON.stringify(payload.history));
-    if (payload.settings) this.settings = JSON.parse(JSON.stringify(payload.settings));
-    if (Array.isArray(payload.customApps)) this.apps = JSON.parse(JSON.stringify(payload.customApps));
+    this.existed.vault = true;
+    if (Array.isArray(payload.customers)) {
+      this.customers = JSON.parse(JSON.stringify(payload.customers));
+      this.existed.customers = true;
+    }
+    if (Array.isArray(payload.history)) {
+      this.history = JSON.parse(JSON.stringify(payload.history));
+      this.existed.history = true;
+    }
+    if (payload.settings) {
+      this.settings = JSON.parse(JSON.stringify(payload.settings));
+      this.existed.settings = true;
+    }
+    if (Array.isArray(payload.customApps)) {
+      this.apps = JSON.parse(JSON.stringify(payload.customApps));
+      this.existed.customApps = true;
+    }
+    this.restoredOnce = true;
   }
 }
 
@@ -531,6 +613,179 @@ async function runMigrationTests() {
     const serializedDiag = JSON.stringify(diag);
     assert(!serializedDiag.includes(kp.privateKeyHex), 'Diagnostics object does NOT contain privateKeyHex');
     assert(!serializedDiag.includes('privateKey'), 'Diagnostics object contains zero private key properties');
+  }
+
+  // -----------------------------------------------------------
+  // Test 16: Empty Electron State Rollback Removes Newly Written Data
+  // -----------------------------------------------------------
+  console.log('\n[Test 16] Empty Electron State Rollback Removes Newly Written Data');
+  {
+    const { storage, migration } = createTestServices();
+    const { backup } = await createValidBackupPayload(password);
+    const stageRes = await migration.stageMigration(JSON.stringify(backup), password);
+    storage.tamperVaultAfterRestore = true;
+
+    const commitRes = await migration.commitMigration({ proof: stageRes.proof! });
+
+    assert(commitRes.success === false, 'Commit failed after simulated post-write verification failure');
+    assert(await storage.getEncryptedVault() === null, 'Newly written vault removed after rollback from empty state');
+    assert((await storage.getCustomerRegistry()).length === 0, 'Customers restored to empty state');
+    assert((await storage.getLicenseHistory()).length === 0, 'History restored to empty state');
+    assert((await storage.getCustomApps()).length === 0, 'Custom apps restored to empty state');
+    assert(storage.existed.vault === false, 'Vault domain existence restored to absent');
+    assert(storage.existed.customers === false, 'Customer domain existence restored to absent');
+    assert(storage.existed.history === false, 'History domain existence restored to absent');
+    assert(storage.existed.settings === false, 'Settings domain existence restored to absent');
+    assert(storage.existed.customApps === false, 'Custom apps domain existence restored to absent');
+    assert((await storage.getOwnerSettings()).ownerName === 'Aladzan Corpora Owner', 'Settings restored to default fallback');
+  }
+
+  // -----------------------------------------------------------
+  // Test 17: Failure After Imported Vault Unlock Leaves Runtime Locked
+  // -----------------------------------------------------------
+  console.log('\n[Test 17] Failure After Imported Vault Unlock Leaves Runtime Locked');
+  {
+    const { storage, vault, migration } = createTestServices();
+    const signing = new MainSigningService(vault, storage as any);
+    const { backup } = await createValidBackupPayload(password);
+    const stageRes = await migration.stageMigration(JSON.stringify(backup), password);
+    storage.failCustomerReadAfterRestore = true;
+
+    const commitRes = await migration.commitMigration({ proof: stageRes.proof! });
+    const status = await vault.getStatus();
+    const signRes = await signing.generateLicense({
+      appId: 'alco-point-of-sale',
+      deviceId: 'ALCO-DEV-7A9B-4C2E-8F1D',
+      customerId: 'CUS-NUSANTARAD-9B4A71',
+      plan: 'pro',
+      licenseType: 'lifetime',
+      expiresAt: null,
+      features: []
+    });
+
+    assert(commitRes.success === false, 'Commit failed after imported vault was unlocked');
+    assert(status.status === 'uninitialized' || status.status === 'locked', 'Vault service does not retain imported unlocked authority');
+    assert(signRes.success === false && !!signRes.error?.includes('locked'), 'Imported private key is no longer usable for signing');
+  }
+
+  // -----------------------------------------------------------
+  // Test 18: Existing Authority Rollback Restores Disk and Leaves Runtime Locked
+  // -----------------------------------------------------------
+  console.log('\n[Test 18] Existing Authority Rollback Restores Disk and Leaves Runtime Locked');
+  {
+    const { storage, vault, migration } = createTestServices();
+    await vault.setupVault('ExistingPassword123!');
+    const previousVault = await storage.getEncryptedVault();
+    await storage.saveCustomerRegistry([{
+      customerId: 'CUS-OLD-1',
+      name: 'Old Customer',
+      email: 'old@example.com',
+      emailNormalized: 'old@example.com',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }]);
+
+    const { backup } = await createValidBackupPayload(password);
+    const stageRes = await migration.stageMigration(JSON.stringify(backup), password);
+    storage.failCustomerReadAfterRestore = true;
+
+    const commitRes = await migration.commitMigration({ proof: stageRes.proof!, overwriteExisting: true });
+    const restoredVault = await storage.getEncryptedVault();
+    const status = await vault.getStatus();
+
+    assert(commitRes.success === false, 'Commit failed with existing authority and simulated post-unlock failure');
+    assert(restoredVault?.fingerprint === previousVault?.fingerprint, 'Old disk authority restored');
+    assert((await storage.getCustomerRegistry())[0]?.customerId === 'CUS-OLD-1', 'Old customer registry restored');
+    assert(status.status === 'locked', 'Runtime vault remains locked after rollback');
+  }
+
+  // -----------------------------------------------------------
+  // Test 19: Strict Customer Validation Rejects Duplicate Normalized Email
+  // -----------------------------------------------------------
+  console.log('\n[Test 19] Strict Customer Validation Rejects Duplicate Normalized Email');
+  {
+    const { migration } = createTestServices();
+    const { backup } = await createValidBackupPayload(password);
+    backup.customers = [
+      ...backup.customers!,
+      { ...backup.customers![0], customerId: 'CUS-DIFFERENT-2' }
+    ];
+    const res = await migration.stageMigration(JSON.stringify(backup), password);
+    assert(res.success === false, 'Duplicate emailNormalized rejected');
+    assert(!!res.error?.includes('Duplicate emailNormalized'), 'Duplicate normalized email error reported');
+  }
+
+  // -----------------------------------------------------------
+  // Test 20: Strict Customer Validation Rejects Duplicate Customer ID
+  // -----------------------------------------------------------
+  console.log('\n[Test 20] Strict Customer Validation Rejects Duplicate Customer ID');
+  {
+    const { migration } = createTestServices();
+    const { backup } = await createValidBackupPayload(password);
+    backup.customers = [
+      ...backup.customers!,
+      { ...backup.customers![0], email: 'second@example.com', emailNormalized: 'second@example.com' }
+    ];
+    const res = await migration.stageMigration(JSON.stringify(backup), password);
+    assert(res.success === false, 'Duplicate customerId rejected');
+    assert(!!res.error?.includes('Duplicate customerId'), 'Duplicate customerId error reported');
+  }
+
+  // -----------------------------------------------------------
+  // Test 21: Strict Customer Validation Rejects emailNormalized Mismatch
+  // -----------------------------------------------------------
+  console.log('\n[Test 21] Strict Customer Validation Rejects emailNormalized Mismatch');
+  {
+    const { migration } = createTestServices();
+    const { backup } = await createValidBackupPayload(password);
+    backup.customers![0].emailNormalized = 'wrong@example.com';
+    const res = await migration.stageMigration(JSON.stringify(backup), password);
+    assert(res.success === false, 'emailNormalized mismatch rejected');
+    assert(!!res.error?.includes('emailNormalized must equal'), 'emailNormalized mismatch error reported');
+  }
+
+  // -----------------------------------------------------------
+  // Test 22: Strict Customer Validation Rejects Invalid Timestamps
+  // -----------------------------------------------------------
+  console.log('\n[Test 22] Strict Customer Validation Rejects Invalid Timestamps');
+  {
+    const { migration } = createTestServices();
+    const { backup } = await createValidBackupPayload(password);
+    backup.customers![0].updatedAt = 'not-a-date';
+    const res = await migration.stageMigration(JSON.stringify(backup), password);
+    assert(res.success === false, 'Invalid customer timestamps rejected');
+    assert(!!res.error?.includes('valid date strings'), 'Invalid timestamp error reported');
+  }
+
+  // -----------------------------------------------------------
+  // Test 23: Strict Customer Validation Accepts Optional Field Types
+  // -----------------------------------------------------------
+  console.log('\n[Test 23] Strict Customer Validation Accepts Optional Field Types');
+  {
+    const { migration } = createTestServices();
+    const { backup } = await createValidBackupPayload(password);
+    backup.customers![0] = {
+      ...backup.customers![0],
+      whatsapp: '+6281234567890',
+      segment: 'enterprise',
+      acquisitionSource: 'referral',
+      marketingConsent: true
+    };
+    const res = await migration.stageMigration(JSON.stringify(backup), password);
+    assert(res.success === true, 'Valid optional customer fields accepted');
+  }
+
+  // -----------------------------------------------------------
+  // Test 24: Migration Proof Uses Secure Randomness Shape
+  // -----------------------------------------------------------
+  console.log('\n[Test 24] Migration Proof Uses Secure Randomness Shape');
+  {
+    const { migration } = createTestServices();
+    const { backup } = await createValidBackupPayload(password);
+    const res = await migration.stageMigration(JSON.stringify(backup), password);
+    const source = fs.readFileSync(new URL('../electron/services/migration-service.ts', import.meta.url), 'utf-8');
+    assert(/^mig_\d+_[0-9a-f]{32}$/.test(res.proof!.proofId), 'Migration proof ID uses 16-byte hex suffix');
+    assert(source.includes("randomBytes(16)") && !source.includes('Math.random()'), 'Migration proof source uses node:crypto randomBytes, not Math.random');
   }
 
   console.log('\n------------------------------------------------------');

@@ -25,6 +25,8 @@ import {
   RuntimeDiagnostics,
   AlcoBackupPayload 
 } from '../types';
+import { AlcoAppDefinition, AlcoCustomerRecord, AlcoLicenseRecord, EncryptedOwnerVault } from '../../src/modules/types';
+import { OwnerSettings } from '../../src/modules/persistence/persistence-interface';
 import { decryptWithPassword } from '../../src/modules/vault-crypto';
 import { 
   derivePublicKeyHexFromSecretKey, 
@@ -32,34 +34,28 @@ import {
   isValidPublicKeyHex, 
   isValidSecretKeyHex 
 } from '../../src/modules/signing';
+import { validateCustomerRegistryPayload } from '../../src/modules/customer-registry-validation';
+import { randomBytes } from 'node:crypto';
 
 const MAX_BACKUP_JSON_LENGTH = 5 * 1024 * 1024; // 5 MB
+
+type StorageDomain = 'vault' | 'customers' | 'history' | 'settings' | 'customApps';
+
+interface MigrationRollbackSnapshot {
+  existed: Record<StorageDomain, boolean>;
+  vault: EncryptedOwnerVault | null;
+  customers: AlcoCustomerRecord[];
+  history: AlcoLicenseRecord[];
+  settings: OwnerSettings;
+  customApps: AlcoAppDefinition[];
+}
 
 function isStrictHexLength(value: unknown, length: number): boolean {
   return typeof value === 'string' && value.length === length && isStrictHex(value);
 }
 
-function isValidCustomerRegistryPayload(customers: unknown): boolean {
-  if (customers === undefined) return true;
-  if (!Array.isArray(customers) || customers.length > 10000) return false;
-
-  return customers.every((customer) => {
-    if (!customer || typeof customer !== 'object') return false;
-    const c = customer as Record<string, unknown>;
-    return (
-      typeof c.customerId === 'string' &&
-      c.customerId.length > 0 &&
-      c.customerId.length <= 80 &&
-      typeof c.name === 'string' &&
-      c.name.length <= 160 &&
-      typeof c.email === 'string' &&
-      c.email.length > 0 &&
-      c.email.length <= 254 &&
-      typeof c.emailNormalized === 'string' &&
-      c.emailNormalized.length > 0 &&
-      typeof c.createdAt === 'string'
-    );
-  });
+function createMigrationProofId(): string {
+  return `mig_${Date.now()}_${randomBytes(16).toString('hex')}`;
 }
 
 export class MainMigrationService {
@@ -73,6 +69,80 @@ export class MainMigrationService {
   constructor(storage: ElectronFileStorageService, vaultService: MainVaultService) {
     this.storage = storage;
     this.vaultService = vaultService;
+  }
+
+  private domainExists(domain: StorageDomain, value: unknown): boolean {
+    const storageWithExistence = this.storage as ElectronFileStorageService & {
+      storageDomainExists?: (domain: StorageDomain) => boolean;
+    };
+    if (typeof storageWithExistence.storageDomainExists === 'function') {
+      return storageWithExistence.storageDomainExists(domain);
+    }
+    if (Array.isArray(value)) return value.length > 0;
+    return value !== null && value !== undefined;
+  }
+
+  private async captureRollbackSnapshot(): Promise<MigrationRollbackSnapshot> {
+    const vault = await this.storage.getEncryptedVault();
+    const customers = await this.storage.getCustomerRegistry();
+    const history = await this.storage.getLicenseHistory();
+    const settings = await this.storage.getOwnerSettings();
+    const customApps = await this.storage.getCustomApps();
+
+    return {
+      existed: {
+        vault: this.domainExists('vault', vault),
+        customers: this.domainExists('customers', customers),
+        history: this.domainExists('history', history),
+        settings: this.domainExists('settings', settings),
+        customApps: this.domainExists('customApps', customApps)
+      },
+      vault,
+      customers,
+      history,
+      settings,
+      customApps
+    };
+  }
+
+  private async rollbackToSnapshot(snapshot: MigrationRollbackSnapshot): Promise<void> {
+    const storageWithDeletes = this.storage as ElectronFileStorageService & {
+      deleteEncryptedVault?: () => Promise<void>;
+      deleteCustomerRegistry?: () => Promise<void>;
+      deleteLicenseHistory?: () => Promise<void>;
+      deleteOwnerSettings?: () => Promise<void>;
+      deleteCustomApps?: () => Promise<void>;
+    };
+
+    if (snapshot.existed.vault && snapshot.vault) {
+      await this.storage.saveEncryptedVault(snapshot.vault);
+    } else {
+      await storageWithDeletes.deleteEncryptedVault?.();
+    }
+
+    if (snapshot.existed.customers) {
+      await this.storage.saveCustomerRegistry(snapshot.customers);
+    } else {
+      await storageWithDeletes.deleteCustomerRegistry?.();
+    }
+
+    if (snapshot.existed.history) {
+      await this.storage.saveLicenseHistory(snapshot.history);
+    } else {
+      await storageWithDeletes.deleteLicenseHistory?.();
+    }
+
+    if (snapshot.existed.settings) {
+      await this.storage.saveOwnerSettings(snapshot.settings);
+    } else {
+      await storageWithDeletes.deleteOwnerSettings?.();
+    }
+
+    if (snapshot.existed.customApps) {
+      await this.storage.saveCustomApps(snapshot.customApps);
+    } else {
+      await storageWithDeletes.deleteCustomApps?.();
+    }
   }
 
   /**
@@ -135,8 +205,9 @@ export class MainMigrationService {
       return { success: false, error: 'Invalid authority fingerprint in backup vault.' };
     }
 
-    if (!isValidCustomerRegistryPayload(parsed.customers)) {
-      return { success: false, error: 'Corrupted customer registry in backup payload.' };
+    const customerValidation = validateCustomerRegistryPayload(parsed.customers);
+    if (!customerValidation.valid) {
+      return { success: false, error: customerValidation.error || 'Corrupted customer registry in backup payload.' };
     }
 
     // Step 4: Main Process decrypts vault
@@ -197,7 +268,7 @@ export class MainMigrationService {
     const existingVault = await this.storage.getEncryptedVault();
 
     const proof: MigrationProof = {
-      proofId: `mig_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+      proofId: createMigrationProofId(),
       backupFingerprint: v.fingerprint,
       backupPublicKeyHex: v.publicKeyHex,
       recordCount: Array.isArray(parsed.history) ? parsed.history.length : 0,
@@ -274,12 +345,7 @@ export class MainMigrationService {
       };
     }
 
-    // Capture pre-migration rollback snapshot
-    const previousVault = await this.storage.getEncryptedVault();
-    const previousCustomers = await this.storage.getCustomerRegistry();
-    const previousHistory = await this.storage.getLicenseHistory();
-    const previousSettings = await this.storage.getOwnerSettings();
-    const previousApps = await this.storage.getCustomApps();
+    const rollbackSnapshot = await this.captureRollbackSnapshot();
 
     const targetFingerprint = this.stagedProof.backupFingerprint;
     const targetPublicKeyHex = this.stagedProof.backupPublicKeyHex;
@@ -347,15 +413,10 @@ export class MainMigrationService {
         diagnostics
       };
     } catch (err: any) {
-      // Critical Rollback: restore previous snapshot
+      // Critical Rollback: drop any imported runtime private key before restoring disk.
       try {
-        if (previousVault) {
-          await this.storage.saveEncryptedVault(previousVault);
-          await this.storage.saveCustomerRegistry(previousCustomers);
-          await this.storage.saveLicenseHistory(previousHistory);
-          await this.storage.saveOwnerSettings(previousSettings);
-          await this.storage.saveCustomApps(previousApps);
-        }
+        await this.vaultService.lockVault();
+        await this.rollbackToSnapshot(rollbackSnapshot);
       } catch (rollbackErr) {
         console.error('Critical rollback failure:', rollbackErr);
       }

@@ -59,6 +59,7 @@ import {
 } from './signing';
 import { createLicensePayload } from './license-payload';
 import { resolveOrCreateCustomerRecord } from './customer-registry';
+import { validateCustomerRegistryPayload } from './customer-registry-validation';
 
 const MAX_BACKUP_JSON_LENGTH = 5 * 1024 * 1024;
 
@@ -86,39 +87,12 @@ function isStrictHexLength(value: unknown, length: number): boolean {
   return typeof value === 'string' && value.length === length && isStrictHex(value);
 }
 
-function isValidCustomerRegistryPayload(customers: unknown): boolean {
-  if (customers === undefined) return true;
-  if (!Array.isArray(customers) || customers.length > 10000) return false;
-
-  return customers.every((customer) => {
-    if (!customer || typeof customer !== 'object') return false;
-    const c = customer as Record<string, unknown>;
-    return (
-      typeof c.customerId === 'string' &&
-      c.customerId.length > 0 &&
-      c.customerId.length <= 80 &&
-      typeof c.name === 'string' &&
-      c.name.length <= 160 &&
-      typeof c.email === 'string' &&
-      c.email.length > 0 &&
-      c.email.length <= 254 &&
-      typeof c.emailNormalized === 'string' &&
-      c.emailNormalized.length > 0 &&
-      c.emailNormalized.length <= 254 &&
-      typeof c.createdAt === 'string' &&
-      typeof c.updatedAt === 'string'
-    );
-  });
-}
-
 function createProofId(): string {
   const bytes = new Uint8Array(12);
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
     crypto.getRandomValues(bytes);
   } else {
-    for (let i = 0; i < bytes.length; i += 1) {
-      bytes[i] = Math.floor(Math.random() * 256);
-    }
+    throw new Error('Secure randomness is unavailable.');
   }
   return `proof-${Date.now()}-${Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')}`;
 }
@@ -429,8 +403,9 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
       if (!isValidPublicKeyHex(v.publicKeyHex) || typeof v.fingerprint !== 'string' || v.fingerprint.length > 80) {
         return { valid: false, error: 'Invalid authority public identity in backup.' };
       }
-      if (!isValidCustomerRegistryPayload(parsed.customers)) {
-        return { valid: false, error: 'Invalid customer registry in backup.' };
+      const customerValidation = validateCustomerRegistryPayload(parsed.customers);
+      if (!customerValidation.valid) {
+        return { valid: false, error: customerValidation.error || 'Invalid customer registry in backup.' };
       }
       return { valid: true, backup: parsed };
     } catch (err: any) {
@@ -584,8 +559,9 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
       return { success: false, error: 'Invalid authority fingerprint in backup vault.' };
     }
 
-    if (!isValidCustomerRegistryPayload(parsed.customers)) {
-      return { success: false, error: 'Corrupted customer registry in backup payload.' };
+    const customerValidation = validateCustomerRegistryPayload(parsed.customers);
+    if (!customerValidation.valid) {
+      return { success: false, error: customerValidation.error || 'Corrupted customer registry in backup payload.' };
     }
 
     let decryptedJson: string;

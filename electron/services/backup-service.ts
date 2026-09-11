@@ -7,6 +7,7 @@
 
 import { decryptWithPassword } from '../../src/modules/vault-crypto';
 import { derivePublicKeyHexFromSecretKey, isStrictHex, isValidPublicKeyHex, isValidSecretKeyHex } from '../../src/modules/signing';
+import { validateCustomerRegistryPayload } from '../../src/modules/customer-registry-validation';
 import { ElectronFileStorageService } from './storage-service';
 import { MainVaultService } from './vault-service';
 import { 
@@ -24,31 +25,6 @@ const MAX_BACKUP_JSON_LENGTH = 5 * 1024 * 1024;
 
 function isStrictHexLength(value: unknown, length: number): boolean {
   return typeof value === 'string' && value.length === length && isStrictHex(value);
-}
-
-function isValidCustomerRegistryPayload(customers: unknown): boolean {
-  if (customers === undefined) return true;
-  if (!Array.isArray(customers) || customers.length > 10000) return false;
-
-  return customers.every((customer) => {
-    if (!customer || typeof customer !== 'object') return false;
-    const c = customer as Record<string, unknown>;
-    return (
-      typeof c.customerId === 'string' &&
-      c.customerId.length > 0 &&
-      c.customerId.length <= 80 &&
-      typeof c.name === 'string' &&
-      c.name.length <= 160 &&
-      typeof c.email === 'string' &&
-      c.email.length > 0 &&
-      c.email.length <= 254 &&
-      typeof c.emailNormalized === 'string' &&
-      c.emailNormalized.length > 0 &&
-      c.emailNormalized.length <= 254 &&
-      typeof c.createdAt === 'string' &&
-      typeof c.updatedAt === 'string'
-    );
-  });
 }
 
 function createProofId(): string {
@@ -113,8 +89,9 @@ export class MainBackupService {
       if (!isValidPublicKeyHex(v.publicKeyHex) || typeof v.fingerprint !== 'string' || v.fingerprint.length > 80) {
         return { valid: false, error: 'Invalid authority public identity in backup.' };
       }
-      if (!isValidCustomerRegistryPayload(parsed.customers)) {
-        return { valid: false, error: 'Invalid customer registry in backup.' };
+      const customerValidation = validateCustomerRegistryPayload(parsed.customers);
+      if (!customerValidation.valid) {
+        return { valid: false, error: customerValidation.error || 'Invalid customer registry in backup.' };
       }
 
       return { valid: true, backup: parsed };
