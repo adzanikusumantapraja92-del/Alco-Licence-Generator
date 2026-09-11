@@ -237,6 +237,14 @@ async function runTests() {
     rawLegacyAfterRecovery === null,
     '8.1 Plaintext alco_owner_keypair_v1 is permanently purged from storage upon successful recovery'
   );
+  const isAbsent8 = await adapter.isLegacyKeyPairAbsent();
+  assert(isAbsent8 === true, '8.2 isLegacyKeyPairAbsent reports true after successful removal');
+  const hasLegacy8 = await adapter.hasLegacyKeyPair();
+  assert(hasLegacy8 === false, '8.3 hasLegacyKeyPair reports false after successful removal');
+  assert(
+    !JSON.stringify(recoveryRes).includes(originalKeyPair.privateKeyHex),
+    '8.4 Recovery response does NOT expose privateKeyHex'
+  );
 
   // -------------------------------------------------------------
   // Test 9: Failed encryption preserves legacy key
@@ -455,6 +463,58 @@ async function runTests() {
     electronStorage.vault?.fingerprint === testKey14.fingerprint,
     '16.5 Electron vault fingerprint matches identity'
   );
+
+  // -------------------------------------------------------------
+  // Test 17: Legacy plaintext key deletion failure behavior & verification
+  // -------------------------------------------------------------
+  console.log('\n[Test 17] Hardened legacy plaintext key deletion failure behavior');
+  mockStorage.clear();
+  const testKey17 = generateEd25519KeyPair();
+  mockStorage.setItem(STORAGE_KEYS.LEGACY_KEYPAIR, JSON.stringify(testKey17));
+
+  // Simulate storage failure during removeItem
+  const origRemoveItem = mockStorage.removeItem.bind(mockStorage);
+  mockStorage.removeItem = () => {
+    // Fail to remove: do nothing or throw
+    throw new Error('Disk quota exceeded / storage locked');
+  };
+
+  const failedDeletionRecovery = await authorityClient.recoverLegacyAuthority({
+    masterPassword: 'StrongPassword123!',
+    vaultHint: 'my hint'
+  });
+
+  // Restore mockStorage.removeItem
+  mockStorage.removeItem = origRemoveItem;
+
+  assert(failedDeletionRecovery.success === false, '17.1 Deletion failure does NOT return recovery success');
+  assert(
+    failedDeletionRecovery.error?.includes('Security alert') &&
+    failedDeletionRecovery.error?.includes('manual intervention is required'),
+    '17.2 Error message explicitly states security alert and manual intervention requirement'
+  );
+  assert(
+    !JSON.stringify(failedDeletionRecovery).includes(testKey17.privateKeyHex),
+    '17.3 Response does NOT expose privateKeyHex'
+  );
+  assert(
+    failedDeletionRecovery.fingerprint === testKey17.fingerprint,
+    '17.4 Response retains exact legacy fingerprint'
+  );
+  assert(
+    failedDeletionRecovery.publicKeyHex === testKey17.publicKeyHex,
+    '17.5 Response retains exact legacy public key'
+  );
+
+  // Verify that the valid encrypted vault was created and retained (not wiped or rolled back)
+  const storedVault17 = await adapter.getEncryptedVault();
+  assert(storedVault17 !== null, '17.6 Valid encrypted vault is retained in storage on deletion failure');
+  assert(storedVault17?.fingerprint === testKey17.fingerprint, '17.7 Retained vault fingerprint matches legacy key');
+  assert(storedVault17?.publicKeyHex === testKey17.publicKeyHex, '17.8 Retained vault public key matches legacy key');
+
+  // Verify that legacy plaintext key is still in storage because deletion failed
+  const hasLegacy17 = await adapter.hasLegacyKeyPair();
+  assert(hasLegacy17 === true, '17.9 Legacy key remains present when deletion failed');
 
   // -------------------------------------------------------------
   // Summary

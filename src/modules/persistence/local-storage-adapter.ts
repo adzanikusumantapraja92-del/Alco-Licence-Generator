@@ -99,11 +99,19 @@ export class LocalStoragePersistenceAdapter implements IAlcoPersistenceService {
   }
 
   async removeLegacyKeyPair(): Promise<void> {
+    const storage = this.getStorage();
+    storage.removeItem(STORAGE_KEYS.LEGACY_KEYPAIR);
+    if (storage.getItem(STORAGE_KEYS.LEGACY_KEYPAIR) !== null) {
+      throw new Error(`Failed to remove legacy keypair '${STORAGE_KEYS.LEGACY_KEYPAIR}' from storage.`);
+    }
+  }
+
+  async isLegacyKeyPairAbsent(): Promise<boolean> {
     try {
       const storage = this.getStorage();
-      storage.removeItem(STORAGE_KEYS.LEGACY_KEYPAIR);
+      return storage.getItem(STORAGE_KEYS.LEGACY_KEYPAIR) === null;
     } catch {
-      // Safe no-op if storage is inaccessible
+      return false;
     }
   }
 

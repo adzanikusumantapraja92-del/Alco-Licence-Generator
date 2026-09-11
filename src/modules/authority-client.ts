@@ -356,12 +356,38 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
       };
     }
 
-    // ONLY AFTER successful verification: Remove legacy plaintext key
-    await browserStorage.removeLegacyKeyPair();
-
-    // After successful recovery: browser vault should be locked
+    // Ensure volatile runtime keys are locked and not held in memory
     browserVolatilePrivateKey = null;
     browserVolatileFingerprint = null;
+
+    // ONLY AFTER successful verification: Remove legacy plaintext key with observable failure & post-deletion verification
+    try {
+      await browserStorage.removeLegacyKeyPair();
+
+      // Post-deletion verification: verify alco_owner_keypair_v1 no longer exists
+      const isAbsent = await browserStorage.isLegacyKeyPairAbsent();
+      const hasLegacy = await browserStorage.hasLegacyKeyPair();
+
+      if (!isAbsent || hasLegacy) {
+        throw new Error(`Verification failed: Legacy plaintext key '${STORAGE_KEYS.LEGACY_KEYPAIR}' still persists in storage after deletion attempt.`);
+      }
+    } catch (delErr: any) {
+      // Deletion failed: fail-closed security response
+      // - DO NOT report successful recovery (success: false)
+      // - Do NOT generate another authority
+      // - Keep the valid encrypted v2 vault intact in storage (do not roll back)
+      // - Return clear security error requiring manual intervention
+      // - ZERO privateKeyHex exposure
+      const safeErrorMsg = delErr instanceof Error ? delErr.message : 'Storage deletion failure';
+      return {
+        success: false,
+        status: 'locked',
+        fingerprint: validated.fingerprint,
+        publicKeyHex: validated.publicKeyHex,
+        createdAt: vault.createdAt,
+        error: `Security alert: Encrypted authority vault was successfully created, but plaintext legacy cleanup failed and manual intervention is required. Please manually remove ${STORAGE_KEYS.LEGACY_KEYPAIR} from browser storage. Details: ${safeErrorMsg}`
+      };
+    }
 
     return {
       success: true,
