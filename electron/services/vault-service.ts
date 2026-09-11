@@ -57,7 +57,7 @@ export class MainVaultService {
   async getStatus(): Promise<VaultStatusResult> {
     const vault = await this.storage.getEncryptedVault();
     if (!vault) {
-      return { status: 'uninitialized' };
+      return { status: 'uninitialized', firstRunState: 'no_authority' };
     }
 
     const isUnlocked = this.isUnlocked();
@@ -66,7 +66,8 @@ export class MainVaultService {
       fingerprint: vault.fingerprint,
       publicKeyHex: vault.publicKeyHex,
       createdAt: vault.createdAt,
-      vaultHint: vault.vaultHint
+      vaultHint: vault.vaultHint,
+      firstRunState: 'encrypted_v2_exists'
     };
   }
 

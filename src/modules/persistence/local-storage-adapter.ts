@@ -65,7 +65,46 @@ export class LocalStoragePersistenceAdapter implements IAlcoPersistenceService {
   async saveEncryptedVault(vault: EncryptedOwnerVault): Promise<void> {
     const storage = this.getStorage();
     storage.setItem(STORAGE_KEYS.VAULT, JSON.stringify(vault));
-    storage.removeItem(STORAGE_KEYS.LEGACY_KEYPAIR);
+  }
+
+  async hasLegacyKeyPair(): Promise<boolean> {
+    try {
+      const storage = this.getStorage();
+      const raw = storage.getItem(STORAGE_KEYS.LEGACY_KEYPAIR);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      return typeof parsed?.publicKeyHex === 'string' && typeof parsed?.privateKeyHex === 'string';
+    } catch {
+      return false;
+    }
+  }
+
+  async getLegacyKeyPair(): Promise<{ publicKeyHex: string; privateKeyHex: string; fingerprint?: string } | null> {
+    try {
+      const storage = this.getStorage();
+      const raw = storage.getItem(STORAGE_KEYS.LEGACY_KEYPAIR);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (typeof parsed?.publicKeyHex === 'string' && typeof parsed?.privateKeyHex === 'string') {
+        return {
+          publicKeyHex: parsed.publicKeyHex,
+          privateKeyHex: parsed.privateKeyHex,
+          fingerprint: typeof parsed.fingerprint === 'string' ? parsed.fingerprint : undefined
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async removeLegacyKeyPair(): Promise<void> {
+    try {
+      const storage = this.getStorage();
+      storage.removeItem(STORAGE_KEYS.LEGACY_KEYPAIR);
+    } catch {
+      // Safe no-op if storage is inaccessible
+    }
   }
 
   async getOwnerPublicMeta(): Promise<OwnerKeyPair | null> {

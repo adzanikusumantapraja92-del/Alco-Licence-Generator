@@ -46,7 +46,7 @@ import {
   DEFAULT_OWNER_SETTINGS, 
   AlcoBackupPayload 
 } from './persistence/persistence-interface';
-import { LocalStoragePersistenceAdapter } from './persistence/local-storage-adapter';
+import { LocalStoragePersistenceAdapter, STORAGE_KEYS } from './persistence/local-storage-adapter';
 import { encryptWithPassword, decryptWithPassword } from './vault-crypto';
 import {
   derivePublicKeyHexFromSecretKey,
@@ -60,6 +60,7 @@ import {
 import { createLicensePayload } from './license-payload';
 import { resolveOrCreateCustomerRecord } from './customer-registry';
 import { validateCustomerRegistryPayload } from './customer-registry-validation';
+import { validateLegacyKeyPair, ValidatedLegacyKeyPair } from './legacy-recovery';
 
 const MAX_BACKUP_JSON_LENGTH = 5 * 1024 * 1024;
 
@@ -114,16 +115,42 @@ let browserStagedMigrationProof: MigrationProof | null = null;
 class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
   async getVaultStatus(): Promise<VaultStatusResult> {
     const vault = await browserStorage.getEncryptedVault();
-    if (!vault) {
-      return { status: 'uninitialized' };
+    if (vault) {
+      const isUnlocked = !!browserVolatilePrivateKey;
+      return {
+        status: isUnlocked ? 'unlocked' : 'locked',
+        fingerprint: vault.fingerprint,
+        publicKeyHex: vault.publicKeyHex,
+        createdAt: vault.createdAt,
+        vaultHint: vault.vaultHint,
+        firstRunState: 'encrypted_v2_exists'
+      };
     }
-    const isUnlocked = !!browserVolatilePrivateKey;
+
+    // No v2 encrypted vault: check for unencrypted legacy keypair
+    const hasLegacy = await browserStorage.hasLegacyKeyPair();
+    if (hasLegacy) {
+      try {
+        const rawLegacy = await browserStorage.getLegacyKeyPair();
+        if (rawLegacy) {
+          const validated = validateLegacyKeyPair(rawLegacy);
+          return {
+            status: 'uninitialized',
+            firstRunState: 'legacy_authority_detected',
+            legacyAuthority: {
+              fingerprint: validated.fingerprint,
+              publicKeyHex: validated.publicKeyHex
+            }
+          };
+        }
+      } catch {
+        // Corrupted legacy key - fail closed, do not report as valid legacy authority
+      }
+    }
+
     return {
-      status: isUnlocked ? 'unlocked' : 'locked',
-      fingerprint: vault.fingerprint,
-      publicKeyHex: vault.publicKeyHex,
-      createdAt: vault.createdAt,
-      vaultHint: vault.vaultHint
+      status: 'uninitialized',
+      firstRunState: 'no_authority'
     };
   }
 
@@ -150,6 +177,12 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
         createdAt: status.createdAt || '',
         error: 'Vault already exists. Setup aborted.'
       };
+    }
+
+    // DO NOT generate a new Ed25519 key if a valid legacy keypair exists unless explicitly forced
+    const hasLegacy = await browserStorage.hasLegacyKeyPair();
+    if (hasLegacy && !input.forceNewAuthority) {
+      return this.recoverLegacyAuthority(input);
     }
 
     const keyPair = generateEd25519KeyPair();
@@ -187,6 +220,154 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
       status: 'unlocked',
       fingerprint: keyPair.fingerprint,
       publicKeyHex: keyPair.publicKeyHex,
+      createdAt: vault.createdAt
+    };
+  }
+
+  async recoverLegacyAuthority(input: VaultSetupInput): Promise<VaultSetupResult> {
+    if (!input.masterPassword || input.masterPassword.length < 8) {
+      return {
+        success: false,
+        status: 'uninitialized',
+        fingerprint: '',
+        publicKeyHex: '',
+        createdAt: '',
+        error: 'Master Password must be at least 8 characters long.'
+      };
+    }
+
+    const existingVault = await browserStorage.hasOwnerVault();
+    if (existingVault) {
+      const status = await this.getVaultStatus();
+      return {
+        success: false,
+        status: status.status,
+        fingerprint: status.fingerprint || '',
+        publicKeyHex: status.publicKeyHex || '',
+        createdAt: status.createdAt || '',
+        error: 'Encrypted v2 vault already exists. Recovery aborted.'
+      };
+    }
+
+    const rawLegacy = await browserStorage.getLegacyKeyPair();
+    if (!rawLegacy) {
+      return {
+        success: false,
+        status: 'uninitialized',
+        fingerprint: '',
+        publicKeyHex: '',
+        createdAt: '',
+        error: 'No legacy browser authority found to recover.'
+      };
+    }
+
+    // Strict validation (fail-closed)
+    let validated: ValidatedLegacyKeyPair;
+    try {
+      validated = validateLegacyKeyPair(rawLegacy);
+    } catch (err: any) {
+      return {
+        success: false,
+        status: 'uninitialized',
+        fingerprint: '',
+        publicKeyHex: '',
+        createdAt: '',
+        error: `Legacy authority validation failed: ${err?.message || 'Invalid key'}`
+      };
+    }
+
+    // Encrypt the SAME private key using AES-256-GCM + PBKDF2-SHA-256
+    let vault: any;
+    try {
+      const secretPayload = JSON.stringify({
+        privateKeyHex: validated.privateKeyHex,
+        fingerprint: validated.fingerprint,
+        createdAt: new Date().toISOString()
+      });
+
+      const encrypted = await encryptWithPassword(secretPayload, input.masterPassword);
+
+      vault = {
+        version: '2.0-aes-gcm' as const,
+        algorithm: 'AES-256-GCM' as const,
+        kdf: 'PBKDF2-SHA-256' as const,
+        iterations: encrypted.iterations,
+        saltHex: encrypted.saltHex,
+        ivHex: encrypted.ivHex,
+        ciphertextHex: encrypted.ciphertextHex,
+        publicKeyHex: validated.publicKeyHex,
+        fingerprint: validated.fingerprint,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        vaultHint: input.vaultHint?.trim() || undefined
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        status: 'uninitialized',
+        fingerprint: '',
+        publicKeyHex: '',
+        createdAt: '',
+        error: `Encryption failed: ${err?.message || 'Failed to encrypt vault'}`
+      };
+    }
+
+    // Save encrypted vault (legacy key NOT removed yet)
+    await browserStorage.saveEncryptedVault(vault);
+
+    // Read back and verify transactionally
+    try {
+      const readBack = await browserStorage.getEncryptedVault();
+      if (!readBack) {
+        throw new Error('Could not read back saved vault from storage.');
+      }
+
+      const decryptedPayload = await decryptWithPassword(readBack, input.masterPassword);
+      const parsedSecret = JSON.parse(decryptedPayload);
+      const decryptedPriv = validateSecretMatchesVault(parsedSecret, readBack);
+
+      if (decryptedPriv.toLowerCase() !== validated.privateKeyHex.toLowerCase()) {
+        throw new Error('Decrypted private key does not match original legacy private key.');
+      }
+
+      if (readBack.publicKeyHex.toLowerCase() !== validated.publicKeyHex.toLowerCase()) {
+        throw new Error('Saved public key does not match original legacy public key.');
+      }
+
+      if (readBack.fingerprint !== validated.fingerprint) {
+        throw new Error('Saved fingerprint does not match original legacy fingerprint.');
+      }
+    } catch (verifErr: any) {
+      // Rollback newly saved vault; legacy key remains untouched!
+      try {
+        const storage = (browserStorage as any).getStorage();
+        storage.removeItem(STORAGE_KEYS.VAULT);
+      } catch {
+        // ignore
+      }
+
+      return {
+        success: false,
+        status: 'uninitialized',
+        fingerprint: '',
+        publicKeyHex: '',
+        createdAt: '',
+        error: `Recovery transaction failed during verification: ${verifErr?.message || 'Parity verification failed'}`
+      };
+    }
+
+    // ONLY AFTER successful verification: Remove legacy plaintext key
+    await browserStorage.removeLegacyKeyPair();
+
+    // After successful recovery: browser vault should be locked
+    browserVolatilePrivateKey = null;
+    browserVolatileFingerprint = null;
+
+    return {
+      success: true,
+      status: 'locked',
+      fingerprint: validated.fingerprint,
+      publicKeyHex: validated.publicKeyHex,
       createdAt: vault.createdAt
     };
   }
@@ -577,7 +758,18 @@ const fallbackService = new BrowserAuthorityFallback();
  */
 export function getAuthorityClient(): IAlcoLicenseRendererApi {
   if (typeof window !== 'undefined' && (window as any).alcoLicense) {
-    return (window as any).alcoLicense;
+    const client = (window as any).alcoLicense;
+    if (!client.recoverLegacyAuthority) {
+      client.recoverLegacyAuthority = async () => ({
+        success: false,
+        status: 'uninitialized',
+        fingerprint: '',
+        publicKeyHex: '',
+        createdAt: '',
+        error: 'Legacy browser recovery is only supported in browser mode.'
+      });
+    }
+    return client;
   }
   return fallbackService;
 }

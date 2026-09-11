@@ -28,7 +28,7 @@ import {
 } from './modules/types';
 import { authorityClient } from './modules/authority-client';
 import { DEFAULT_ALCO_APPS } from './modules/application-registry';
-import { RuntimeDiagnostics } from '../electron/types';
+import { RuntimeDiagnostics, AuthorityFirstRunState, LegacyAuthorityInfo } from '../electron/types';
 
 function mergeRegisteredApps(customApps: AlcoAppDefinition[]): AlcoAppDefinition[] {
   return [
@@ -42,6 +42,8 @@ export default function App() {
   
   // Vault & Cryptographic States (NO inMemoryPrivateKey in React state!)
   const [vaultStatus, setVaultStatus] = useState<VaultStatus>('uninitialized');
+  const [firstRunState, setFirstRunState] = useState<AuthorityFirstRunState>('no_authority');
+  const [legacyAuthority, setLegacyAuthority] = useState<LegacyAuthorityInfo | undefined>(undefined);
 
   // Public key metadata (safe to display and embed into client builds)
   const [keyPair, setKeyPair] = useState<OwnerKeyPair | null>(null);
@@ -68,6 +70,12 @@ export default function App() {
   useEffect(() => {
     authorityClient.getVaultStatus().then((res) => {
       setVaultStatus(res.status);
+      if (res.firstRunState) {
+        setFirstRunState(res.firstRunState);
+      }
+      if (res.legacyAuthority) {
+        setLegacyAuthority(res.legacyAuthority);
+      }
       if (res.publicKeyHex && res.fingerprint) {
         setKeyPair({
           publicKeyHex: res.publicKeyHex,
@@ -149,14 +157,19 @@ export default function App() {
     }
   }, [pendingUnlockCallback]);
 
-  const handleSetupComplete = useCallback((meta: { publicKeyHex: string; fingerprint: string }) => {
+  const handleSetupComplete = useCallback((meta: { publicKeyHex: string; fingerprint: string; status?: VaultStatus }) => {
     setKeyPair({
       publicKeyHex: meta.publicKeyHex,
       fingerprint: meta.fingerprint,
       createdAt: new Date().toISOString()
     });
-    setVaultStatus('unlocked');
     setIsSetupOpen(false);
+    if (meta.status === 'locked') {
+      setVaultStatus('locked');
+      setIsUnlockOpen(true);
+    } else {
+      setVaultStatus('unlocked');
+    }
   }, []);
 
   const handleMigrationComplete = useCallback((diagnostics: RuntimeDiagnostics) => {
@@ -295,6 +308,8 @@ export default function App() {
           setIsSetupOpen(false);
           setIsMigrationOpen(true);
         }}
+        firstRunState={firstRunState}
+        legacyAuthority={legacyAuthority}
       />
 
       {/* Authority Migration Modal (Phase 4) */}

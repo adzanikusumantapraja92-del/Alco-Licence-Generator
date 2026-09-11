@@ -27,17 +27,27 @@ export type { AlcoBackupPayload };
 // Vault IPC
 // ==========================================
 
+export type AuthorityFirstRunState = 'encrypted_v2_exists' | 'legacy_authority_detected' | 'no_authority';
+
+export interface LegacyAuthorityInfo {
+  fingerprint: string;
+  publicKeyHex: string;
+}
+
 export interface VaultStatusResult {
   status: VaultStatus;
   fingerprint?: string;
   publicKeyHex?: string;
   createdAt?: string;
   vaultHint?: string;
+  firstRunState?: AuthorityFirstRunState;
+  legacyAuthority?: LegacyAuthorityInfo;
 }
 
 export interface VaultSetupInput {
   masterPassword: string;
   vaultHint?: string;
+  forceNewAuthority?: boolean;
 }
 
 export interface VaultSetupResult {
@@ -222,6 +232,7 @@ export interface IAlcoLicenseRendererApi {
   // Vault
   getVaultStatus(): Promise<VaultStatusResult>;
   setupVault(input: VaultSetupInput): Promise<VaultSetupResult>;
+  recoverLegacyAuthority?(input: VaultSetupInput): Promise<VaultSetupResult>;
   unlockVault(input: VaultUnlockInput): Promise<VaultUnlockResult>;
   lockVault(): Promise<VaultLockResult>;
   changePassword(input: VaultChangePasswordInput): Promise<VaultChangePasswordResult>;
