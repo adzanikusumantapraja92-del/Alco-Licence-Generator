@@ -354,6 +354,10 @@ async function runElectronSecurityTests() {
   const browserSetup = await browserAuthority.setupVault({ masterPassword: 'BrowserPassword123!' });
   const browserUnlock = await browserAuthority.unlockVault({ masterPassword: 'BrowserPassword123!' });
   const browserBackup = await browserAuthority.exportBackup();
+  const firstBrowserVaultJson = memoryStorage.get('alco_encrypted_owner_vault_v2')!;
+  const firstBrowserVault = JSON.parse(firstBrowserVaultJson);
+  const secondBrowserSetup = await browserAuthority.setupVault({ masterPassword: 'ReplacementPassword123!' });
+  const secondBrowserVaultJson = memoryStorage.get('alco_encrypted_owner_vault_v2')!;
   assertNoPrivateKey('[17 setup]', browserSetup);
   assertNoPrivateKey('[17 unlock]', browserUnlock);
   if (browserSetup.success && browserUnlock.success && JSON.parse(browserBackup).alcoVaultVersion === '2.0-encrypted') {
@@ -361,6 +365,45 @@ async function runElectronSecurityTests() {
     passed++;
   } else {
     throw new Error('[17] FAIL: Browser fallback failed');
+  }
+
+  if (
+    !secondBrowserSetup.success &&
+    secondBrowserSetup.error === 'Vault already exists. Setup aborted.' &&
+    JSON.parse(secondBrowserVaultJson).fingerprint === firstBrowserVault.fingerprint &&
+    JSON.parse(secondBrowserVaultJson).publicKeyHex === firstBrowserVault.publicKeyHex &&
+    secondBrowserVaultJson === firstBrowserVaultJson
+  ) {
+    console.log('[18] ✅ PASS: Browser fallback setupVault refuses to overwrite existing authority');
+    passed++;
+  } else {
+    throw new Error('[18] FAIL: Browser fallback setupVault overwrote or failed to protect existing authority');
+  }
+
+  const browserMigrationStage = await browserAuthority.stageAuthorityMigration(browserBackup, 'BrowserPassword123!');
+  const browserMigrationCommit = await browserAuthority.commitAuthorityMigration({
+    proof: {
+      proofId: 'unused',
+      backupFingerprint: firstBrowserVault.fingerprint,
+      backupPublicKeyHex: firstBrowserVault.publicKeyHex,
+      recordCount: 0,
+      customerCount: 0,
+      customAppsCount: 0,
+      hasSettings: false,
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 1000
+    }
+  });
+  if (
+    !browserMigrationStage.success &&
+    !browserMigrationCommit.success &&
+    browserMigrationStage.error?.includes('only in the Electron desktop application') &&
+    browserMigrationCommit.error?.includes('only in the Electron desktop application')
+  ) {
+    console.log('[19] ✅ PASS: Browser fallback refuses Phase 4 authority migration');
+    passed++;
+  } else {
+    throw new Error('[19] FAIL: Browser fallback exposed production migration success path');
   }
 
   console.log(`=== ALL ELECTRON SECURITY TESTS PASSED: ${passed}/${passed} ===`);
