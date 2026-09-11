@@ -11,6 +11,7 @@ import { MainVaultService } from '../services/vault-service';
 import { MainSigningService } from '../services/signing-service';
 import { ElectronFileStorageService } from '../services/storage-service';
 import { MainBackupService } from '../services/backup-service';
+import { MainMigrationService } from '../services/migration-service';
 import { 
   VaultSetupInput, 
   VaultUnlockInput, 
@@ -18,7 +19,8 @@ import {
   GenerateLicenseInput, 
   UpsertCustomerInput, 
   BackupVerificationProof, 
-  AlcoBackupPayload 
+  AlcoBackupPayload,
+  MigrationCommitInput
 } from '../types';
 import { resolveOrCreateCustomerRecord } from '../../src/modules/customer-registry';
 import { AlcoCustomerRecord, AlcoLicenseRecord, AlcoAppDefinition } from '../../src/modules/types';
@@ -28,7 +30,8 @@ export function registerIpcHandlers(
   vaultService: MainVaultService,
   signingService: MainSigningService,
   storageService: ElectronFileStorageService,
-  backupService: MainBackupService
+  backupService: MainBackupService,
+  migrationService?: MainMigrationService
 ): void {
   // -------------------------------------------------------------
   // Vault Channels
@@ -161,5 +164,48 @@ export function registerIpcHandlers(
   ipcMain.handle(ALCO_IPC_CHANNELS.BACKUP_CANCEL, async () => {
     backupService.cancelStagedRestore();
     return { success: true };
+  });
+
+  // -------------------------------------------------------------
+  // Safe Authority Migration Channels (Phase 4)
+  // -------------------------------------------------------------
+  ipcMain.handle(ALCO_IPC_CHANNELS.MIGRATION_STAGE, async (_event, { rawJson, password }: { rawJson: string; password: string }) => {
+    if (!migrationService) {
+      return { success: false, error: 'Migration service not initialized on Main process.' };
+    }
+    return await migrationService.stageMigration(rawJson, password);
+  });
+
+  ipcMain.handle(ALCO_IPC_CHANNELS.MIGRATION_COMMIT, async (_event, input: MigrationCommitInput) => {
+    if (!migrationService) {
+      return { success: false, error: 'Migration service not initialized on Main process.' };
+    }
+    return await migrationService.commitMigration(input);
+  });
+
+  ipcMain.handle(ALCO_IPC_CHANNELS.MIGRATION_CANCEL, async () => {
+    if (migrationService) {
+      migrationService.cancelMigration();
+    }
+    return { success: true };
+  });
+
+  ipcMain.handle(ALCO_IPC_CHANNELS.DIAGNOSTICS_GET, async () => {
+    if (!migrationService) {
+      const status = await vaultService.getStatus();
+      const customers = await storageService.getCustomerRegistry();
+      const history = await storageService.getLicenseHistory();
+      const customApps = await storageService.getCustomApps();
+      return {
+        storageLocation: 'Electron userData (Local Disk)',
+        status: status.status,
+        fingerprint: status.fingerprint,
+        publicKeyHex: status.publicKeyHex,
+        customersCount: customers.length,
+        historyCount: history.length,
+        customAppsCount: customApps.length
+      };
+    }
+    return await migrationService.getRuntimeDiagnostics();
   });
 }

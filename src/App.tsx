@@ -18,6 +18,7 @@ import { VerifierSimulatorView } from './components/VerifierSimulatorView';
 import { SettingsView } from './components/SettingsView';
 import { VaultSetupModal } from './components/VaultSetupModal';
 import { VaultUnlockModal } from './components/VaultUnlockModal';
+import { AuthorityMigrationModal } from './components/AuthorityMigrationModal';
 
 import { 
   OwnerKeyPair, 
@@ -27,6 +28,7 @@ import {
 } from './modules/types';
 import { authorityClient } from './modules/authority-client';
 import { DEFAULT_ALCO_APPS } from './modules/application-registry';
+import { RuntimeDiagnostics } from '../electron/types';
 
 function mergeRegisteredApps(customApps: AlcoAppDefinition[]): AlcoAppDefinition[] {
   return [
@@ -47,6 +49,7 @@ export default function App() {
   // Modal Dialog states
   const [isSetupOpen, setIsSetupOpen] = useState<boolean>(false);
   const [isUnlockOpen, setIsUnlockOpen] = useState<boolean>(false);
+  const [isMigrationOpen, setIsMigrationOpen] = useState<boolean>(false);
   const [unlockReason, setUnlockReason] = useState<string>('Sign ALCO License Key');
   const [pendingUnlockCallback, setPendingUnlockCallback] = useState<(() => void) | null>(null);
 
@@ -156,6 +159,19 @@ export default function App() {
     setIsSetupOpen(false);
   }, []);
 
+  const handleMigrationComplete = useCallback((diagnostics: RuntimeDiagnostics) => {
+    setIsMigrationOpen(false);
+    refreshAllData();
+    if (diagnostics.publicKeyHex && diagnostics.fingerprint) {
+      setKeyPair({
+        publicKeyHex: diagnostics.publicKeyHex,
+        fingerprint: diagnostics.fingerprint,
+        createdAt: new Date().toISOString()
+      });
+      setVaultStatus(diagnostics.status);
+    }
+  }, [refreshAllData]);
+
   const handleSaveLicense = async (record: AlcoLicenseRecord) => {
     await authorityClient.saveLicenseRecord(record);
     setHistory(await authorityClient.getHistory());
@@ -250,6 +266,7 @@ export default function App() {
             onRequestUnlock={(onSuccess) => handleRequestUnlock(onSuccess, 'Access Keypair Settings')}
             onRequestSetup={() => setIsSetupOpen(true)}
             onRefreshData={refreshAllData}
+            onOpenMigration={() => setIsMigrationOpen(true)}
           />
         )}
       </main>
@@ -274,6 +291,17 @@ export default function App() {
       <VaultSetupModal
         isOpen={isSetupOpen}
         onSetupComplete={handleSetupComplete}
+        onOpenMigration={() => {
+          setIsSetupOpen(false);
+          setIsMigrationOpen(true);
+        }}
+      />
+
+      {/* Authority Migration Modal (Phase 4) */}
+      <AuthorityMigrationModal
+        isOpen={isMigrationOpen}
+        onClose={() => setIsMigrationOpen(false)}
+        onMigrationComplete={handleMigrationComplete}
       />
 
       {/* Unlock Modal */}

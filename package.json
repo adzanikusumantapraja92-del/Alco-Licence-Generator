@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx scripts/test-hardening.ts && tsx scripts/test-customer-identity.ts && tsx scripts/test-electron-security.ts"
+    "test": "tsx scripts/test-hardening.ts && tsx scripts/test-customer-identity.ts && tsx scripts/test-electron-security.ts && tsx scripts/test-migration.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

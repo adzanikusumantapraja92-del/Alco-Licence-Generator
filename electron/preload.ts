@@ -59,7 +59,17 @@ const alcoLicenseApi: IAlcoLicenseRendererApi = {
     ipcRenderer.invoke(ALCO_IPC_CHANNELS.BACKUP_VERIFY, { backup, password }),
   commitRestoreBackup: (proof: BackupVerificationProof) => 
     ipcRenderer.invoke(ALCO_IPC_CHANNELS.BACKUP_COMMIT, proof),
-  cancelStagedRestore: () => ipcRenderer.invoke(ALCO_IPC_CHANNELS.BACKUP_CANCEL)
+  cancelStagedRestore: () => ipcRenderer.invoke(ALCO_IPC_CHANNELS.BACKUP_CANCEL),
+
+  // Safe Authority Migration (Phase 4)
+  stageAuthorityMigration: (rawJson: string, password: string) => 
+    ipcRenderer.invoke(ALCO_IPC_CHANNELS.MIGRATION_STAGE, { rawJson, password }),
+  commitAuthorityMigration: (input) => 
+    ipcRenderer.invoke(ALCO_IPC_CHANNELS.MIGRATION_COMMIT, input),
+  cancelAuthorityMigration: () => 
+    ipcRenderer.invoke(ALCO_IPC_CHANNELS.MIGRATION_CANCEL),
+  getRuntimeDiagnostics: () => 
+    ipcRenderer.invoke(ALCO_IPC_CHANNELS.DIAGNOSTICS_GET)
 };
 
 // Expose safe API to Window

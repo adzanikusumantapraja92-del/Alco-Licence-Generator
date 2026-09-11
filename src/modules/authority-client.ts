@@ -34,6 +34,11 @@ import {
   BackupValidationResult, 
   BackupVerificationResult, 
   BackupRestoreResult, 
+  MigrationProof,
+  MigrationStageResult,
+  MigrationCommitInput,
+  MigrationCommitResult,
+  RuntimeDiagnostics,
   IAlcoLicenseRendererApi 
 } from '../../electron/types';
 import { 
@@ -126,6 +131,11 @@ const browserStorage = new LocalStoragePersistenceAdapter();
 // Fallback backup staging
 let browserStagedBackup: AlcoBackupPayload | null = null;
 let browserStagedProof: BackupVerificationProof | null = null;
+
+// Fallback migration staging (Phase 4)
+let browserStagedMigrationBackup: AlcoBackupPayload | null = null;
+let browserStagedMigrationPassword: string | null = null;
+let browserStagedMigrationProof: MigrationProof | null = null;
 
 class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
   async getVaultStatus(): Promise<VaultStatusResult> {
@@ -518,6 +528,312 @@ class BrowserAuthorityFallback implements IAlcoLicenseRendererApi {
     browserStagedBackup = null;
     browserStagedProof = null;
     return { success: true };
+  }
+
+  // ==========================================
+  // Safe Authority Migration (Phase 4)
+  // ==========================================
+
+  async stageAuthorityMigration(rawJson: string, masterPassword: string): Promise<MigrationStageResult> {
+    if (!rawJson || typeof rawJson !== 'string' || !rawJson.trim()) {
+      return { success: false, error: 'Backup content is empty.' };
+    }
+    if (rawJson.length > MAX_BACKUP_JSON_LENGTH) {
+      return { success: false, error: 'Backup exceeds maximum allowed file size of 5MB.' };
+    }
+    if (!masterPassword || typeof masterPassword !== 'string' || masterPassword.length < 8) {
+      return { success: false, error: 'Master Password must be at least 8 characters long.' };
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch {
+      return { success: false, error: 'Backup is not a valid JSON document.' };
+    }
+
+    if (parsed?.alcoVaultVersion !== '2.0-encrypted') {
+      return {
+        success: false,
+        error: 'Unsupported backup version. Migration requires an ALCO encrypted v2 backup (alcoVaultVersion: "2.0-encrypted").'
+      };
+    }
+
+    const v = parsed?.encryptedVault;
+    if (!v || typeof v !== 'object') {
+      return { success: false, error: 'Corrupted backup: Missing encryptedVault container.' };
+    }
+
+    if (v.version !== '2.0-aes-gcm' || v.algorithm !== 'AES-256-GCM' || v.kdf !== 'PBKDF2-SHA-256') {
+      return { success: false, error: 'Unsupported vault cryptographic parameters.' };
+    }
+
+    if (typeof v.iterations !== 'number' || v.iterations < 100000) {
+      return { success: false, error: 'Inadequate PBKDF2 iteration count in backup.' };
+    }
+
+    if (!isStrictHexLength(v.saltHex, 32) || !isStrictHexLength(v.ivHex, 24) || !isStrictHex(v.ciphertextHex)) {
+      return { success: false, error: 'Corrupted hex encryption vectors in backup vault.' };
+    }
+
+    if (!isValidPublicKeyHex(v.publicKeyHex)) {
+      return { success: false, error: 'Invalid Ed25519 public key format in backup vault.' };
+    }
+
+    if (typeof v.fingerprint !== 'string' || !v.fingerprint.trim() || v.fingerprint.length > 80) {
+      return { success: false, error: 'Invalid authority fingerprint in backup vault.' };
+    }
+
+    if (!isValidCustomerRegistryPayload(parsed.customers)) {
+      return { success: false, error: 'Corrupted customer registry in backup payload.' };
+    }
+
+    let decryptedJson: string;
+    try {
+      decryptedJson = await decryptWithPassword(v, masterPassword);
+    } catch {
+      return { success: false, error: 'Decryption failed: Incorrect Master Password for this backup.' };
+    }
+
+    let secretPayload: any;
+    try {
+      secretPayload = JSON.parse(decryptedJson);
+    } catch {
+      return { success: false, error: 'Corrupted vault payload: decrypted content is not valid JSON.' };
+    }
+
+    const privateKeyHex = typeof secretPayload?.privateKeyHex === 'string'
+      ? secretPayload.privateKeyHex.trim()
+      : '';
+
+    if (!isValidSecretKeyHex(privateKeyHex)) {
+      return {
+        success: false,
+        error: 'Corrupted backup: Invalid Ed25519 private key format (expected 128 hex characters / 64 bytes).'
+      };
+    }
+
+    let derived: { publicKeyHex: string; fingerprint: string };
+    try {
+      derived = derivePublicKeyHexFromSecretKey(privateKeyHex);
+    } catch (err: any) {
+      return {
+        success: false,
+        error: `Cryptographic derivation failure: ${err?.message || 'Cannot derive public key from secret key.'}`
+      };
+    }
+
+    if (derived.publicKeyHex.toLowerCase() !== v.publicKeyHex.toLowerCase()) {
+      return {
+        success: false,
+        error: 'SECURITY VIOLATION: Decrypted private key does not correspond to the backup public key.'
+      };
+    }
+
+    if (derived.fingerprint !== v.fingerprint) {
+      return {
+        success: false,
+        error: 'SECURITY VIOLATION: Authority fingerprint does not match decrypted private key.'
+      };
+    }
+
+    const existingVault = await browserStorage.getEncryptedVault();
+
+    const proof: MigrationProof = {
+      proofId: createProofId(),
+      backupFingerprint: v.fingerprint,
+      backupPublicKeyHex: v.publicKeyHex,
+      recordCount: Array.isArray(parsed.history) ? parsed.history.length : 0,
+      customerCount: Array.isArray(parsed.customers) ? parsed.customers.length : 0,
+      customAppsCount: Array.isArray(parsed.customApps) ? parsed.customApps.length : 0,
+      hasSettings: !!parsed.settings,
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 5 * 60 * 1000
+    };
+
+    browserStagedMigrationBackup = parsed;
+    browserStagedMigrationPassword = masterPassword;
+    browserStagedMigrationProof = proof;
+
+    return {
+      success: true,
+      proof,
+      backupFingerprint: v.fingerprint,
+      backupPublicKeyHex: v.publicKeyHex,
+      customerCount: proof.customerCount,
+      historyCount: proof.recordCount,
+      customAppsCount: proof.customAppsCount,
+      hasSettings: proof.hasSettings,
+      hasExistingVault: !!existingVault,
+      existingFingerprint: existingVault?.fingerprint
+    };
+  }
+
+  async commitAuthorityMigration(input: MigrationCommitInput): Promise<MigrationCommitResult> {
+    if (!browserStagedMigrationBackup || !browserStagedMigrationPassword || !browserStagedMigrationProof) {
+      return {
+        success: false,
+        error: 'No verified migration staged. You must verify backup and password first.'
+      };
+    }
+
+    if (!input.proof || browserStagedMigrationProof.proofId !== input.proof.proofId) {
+      return {
+        success: false,
+        error: 'Invalid migration proof: proof ID mismatch.'
+      };
+    }
+
+    if (
+      browserStagedMigrationProof.backupFingerprint !== input.proof.backupFingerprint ||
+      browserStagedMigrationProof.backupPublicKeyHex !== input.proof.backupPublicKeyHex
+    ) {
+      return {
+        success: false,
+        error: 'SECURITY VIOLATION: Authority identity mismatch in migration proof.'
+      };
+    }
+
+    if (Date.now() > browserStagedMigrationProof.expiresAt || Date.now() > input.proof.expiresAt) {
+      this.cancelAuthorityMigration();
+      return {
+        success: false,
+        error: 'Migration proof expired (5-minute TTL exceeded). Please re-verify backup.'
+      };
+    }
+
+    const existingVault = await browserStorage.getEncryptedVault();
+    if (existingVault && !input.overwriteExisting) {
+      return {
+        success: false,
+        error: 'An existing authority vault is already present in this desktop app. Explicit overwrite confirmation is required.'
+      };
+    }
+
+    // Rollback snapshot
+    const prevVault = await browserStorage.getEncryptedVault();
+    const prevCustomers = await browserStorage.getCustomerRegistry();
+    const prevHistory = await browserStorage.getLicenseHistory();
+    const prevSettings = await browserStorage.getOwnerSettings();
+    const prevApps = await browserStorage.getCustomApps();
+
+    const targetFingerprint = browserStagedMigrationProof.backupFingerprint;
+    const targetPublicKeyHex = browserStagedMigrationProof.backupPublicKeyHex;
+    const password = browserStagedMigrationPassword;
+    const backupPayload = browserStagedMigrationBackup;
+
+    try {
+      await browserStorage.saveEncryptedVault(backupPayload.encryptedVault);
+      if (Array.isArray(backupPayload.customers)) {
+        await browserStorage.saveCustomerRegistry(backupPayload.customers);
+      }
+      if (Array.isArray(backupPayload.history)) {
+        await browserStorage.saveLicenseHistory(backupPayload.history);
+      }
+      if (backupPayload.settings) {
+        await browserStorage.saveOwnerSettings(backupPayload.settings);
+      }
+      if (Array.isArray(backupPayload.customApps)) {
+        await browserStorage.saveCustomApps(backupPayload.customApps);
+      }
+
+      // Read back from storage
+      const storedVault = await browserStorage.getEncryptedVault();
+      if (!storedVault) {
+        throw new Error('Post-migration read verification failed: Vault not found in storage.');
+      }
+      if (storedVault.fingerprint !== targetFingerprint) {
+        throw new Error('Post-migration verification failed: Stored fingerprint does not match target backup fingerprint.');
+      }
+      if (storedVault.publicKeyHex.toLowerCase() !== targetPublicKeyHex.toLowerCase()) {
+        throw new Error('Post-migration verification failed: Stored public key does not match target backup public key.');
+      }
+
+      // Decrypt stored vault and re-derive
+      const decryptedJson = await decryptWithPassword(storedVault, password);
+      const secretPayload = JSON.parse(decryptedJson);
+      const secretKeyHex = typeof secretPayload?.privateKeyHex === 'string'
+        ? secretPayload.privateKeyHex.trim()
+        : '';
+
+      if (!isValidSecretKeyHex(secretKeyHex)) {
+        throw new Error('Post-migration verification failed: Invalid secret key on storage read-back.');
+      }
+
+      const postDerived = derivePublicKeyHexFromSecretKey(secretKeyHex);
+      if (postDerived.fingerprint !== targetFingerprint) {
+        throw new Error('SECURITY VIOLATION: Post-migration derived fingerprint does not match pre-migration fingerprint!');
+      }
+      if (postDerived.publicKeyHex.toLowerCase() !== targetPublicKeyHex.toLowerCase()) {
+        throw new Error('SECURITY VIOLATION: Post-migration derived public key does not match pre-migration public key!');
+      }
+
+      // Unlock volatile memory
+      browserVolatilePrivateKey = secretKeyHex;
+      browserVolatileFingerprint = postDerived.fingerprint;
+
+      const diagnostics: RuntimeDiagnostics = {
+        storageLocation: 'Browser Storage (Fallback)',
+        status: 'unlocked',
+        fingerprint: targetFingerprint,
+        publicKeyHex: targetPublicKeyHex,
+        customersCount: (await browserStorage.getCustomerRegistry()).length,
+        historyCount: (await browserStorage.getLicenseHistory()).length,
+        customAppsCount: (await browserStorage.getCustomApps()).length
+      };
+
+      this.cancelAuthorityMigration();
+
+      return {
+        success: true,
+        message: 'Existing ALCO Authority successfully migrated with 100% cryptographic parity.',
+        diagnostics
+      };
+    } catch (err: any) {
+      try {
+        if (prevVault) {
+          await browserStorage.saveEncryptedVault(prevVault);
+          await browserStorage.saveCustomerRegistry(prevCustomers);
+          await browserStorage.saveLicenseHistory(prevHistory);
+          await browserStorage.saveOwnerSettings(prevSettings);
+          await browserStorage.saveCustomApps(prevApps);
+        }
+      } catch (rbErr) {
+        console.error('Browser rollback failure:', rbErr);
+      }
+
+      this.cancelAuthorityMigration();
+      return {
+        success: false,
+        error: `Migration failed and was rolled back: ${err?.message || 'Verification check failed.'}`
+      };
+    }
+  }
+
+  async cancelAuthorityMigration(): Promise<{ success: boolean }> {
+    browserStagedMigrationBackup = null;
+    browserStagedMigrationPassword = null;
+    browserStagedMigrationProof = null;
+    return { success: true };
+  }
+
+  async getRuntimeDiagnostics(): Promise<RuntimeDiagnostics> {
+    const status = await this.getVaultStatus();
+    const customers = await browserStorage.getCustomerRegistry();
+    const history = await browserStorage.getLicenseHistory();
+    const customApps = await browserStorage.getCustomApps();
+
+    return {
+      storageLocation: typeof window !== 'undefined' && (window as any).alcoLicense 
+        ? 'Electron userData (Local Disk)' 
+        : 'Browser Storage (Fallback)',
+      status: status.status,
+      fingerprint: status.fingerprint,
+      publicKeyHex: status.publicKeyHex,
+      customersCount: customers.length,
+      historyCount: history.length,
+      customAppsCount: customApps.length
+    };
   }
 }
 

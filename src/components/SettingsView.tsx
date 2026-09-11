@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { OwnerKeyPair, VaultStatus } from '../modules/types';
 import { AlcoBackupPayload } from '../modules/persistence/persistence-interface';
-import { BackupVerificationResult, BackupVerificationProof } from '../../electron/types';
+import { BackupVerificationResult, BackupVerificationProof, RuntimeDiagnostics } from '../../electron/types';
 import { authorityClient } from '../modules/authority-client';
 import { CLIENT_VERIFICATION_SNIPPET } from '../modules/verification';
 import { ELECTRON_DEVICE_FINGERPRINT_SNIPPET } from '../modules/device-fingerprint';
@@ -31,6 +31,7 @@ interface SettingsViewProps {
   onRequestUnlock: (onUnlocked?: () => void) => void;
   onRequestSetup: () => void;
   onRefreshData: () => void;
+  onOpenMigration?: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -39,7 +40,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onLockVault,
   onRequestUnlock,
   onRequestSetup,
-  onRefreshData
+  onRefreshData,
+  onOpenMigration
 }) => {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   
@@ -71,10 +73,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [activeCodeTab, setActiveCodeTab] = useState<'verification' | 'fingerprint'>('verification');
   const [vaultHint, setVaultHint] = useState<string | undefined>(undefined);
 
+  // Runtime Diagnostics State (Phase 4)
+  const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
+  const [isRefreshingDiagnostics, setIsRefreshingDiagnostics] = useState<boolean>(false);
+
+  const loadDiagnostics = async () => {
+    setIsRefreshingDiagnostics(true);
+    try {
+      const diag = await authorityClient.getRuntimeDiagnostics();
+      setDiagnostics(diag);
+    } catch {
+      // Ignore
+    } finally {
+      setIsRefreshingDiagnostics(false);
+    }
+  };
+
   useEffect(() => {
     authorityClient.getVaultStatus().then((status) => {
       setVaultHint(status.vaultHint);
     });
+    loadDiagnostics();
   }, [vaultStatus]);
 
   const handleCopy = (text: string, label: string) => {
@@ -239,6 +258,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {onOpenMigration && (
+            <button
+              onClick={onOpenMigration}
+              className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-indigo-950/80 hover:bg-indigo-900 text-indigo-200 border border-indigo-500/40 flex items-center gap-1.5 transition shadow-sm"
+              title="Migrate an existing ALCO authority backup with cryptographic parity check"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Import Existing ALCO Authority</span>
+            </button>
+          )}
+
           {vaultStatus === 'unlocked' ? (
             <button
               onClick={onLockVault}
@@ -262,6 +292,83 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left Column: Owner Keypair & Vault Security */}
         <div className="lg:col-span-6 space-y-6">
+
+          {/* Runtime Verification Diagnostics Card (Phase 4) */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <h3 className="text-sm font-bold uppercase tracking-wider text-white">
+                  Runtime Verification Diagnostics
+                </h3>
+              </div>
+              <button
+                onClick={loadDiagnostics}
+                disabled={isRefreshingDiagnostics}
+                className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-md transition"
+                title="Refresh runtime diagnostics"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingDiagnostics ? 'animate-spin text-indigo-400' : ''}`} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-850 space-y-1">
+                <span className="text-slate-500 block text-[10px] uppercase font-mono">Storage Backend</span>
+                <span className="font-mono text-slate-200 text-xs font-medium block truncate">
+                  {diagnostics?.storageLocation || 'Electron userData (Local Disk)'}
+                </span>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-850 space-y-1">
+                <span className="text-slate-500 block text-[10px] uppercase font-mono">Authority Status</span>
+                <span className={`font-mono text-xs font-semibold uppercase block ${
+                  (diagnostics?.status || vaultStatus) === 'unlocked' ? 'text-emerald-400' : 
+                  (diagnostics?.status || vaultStatus) === 'locked' ? 'text-amber-400' : 'text-slate-400'
+                }`}>
+                  {diagnostics?.status || vaultStatus}
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-850">
+                <span className="text-slate-500 block text-[10px] uppercase font-mono mb-1">Active Fingerprint</span>
+                <span className="font-mono text-indigo-300 text-xs font-bold block truncate">
+                  {diagnostics?.fingerprint || keyPair?.fingerprint || 'No active authority configured'}
+                </span>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-850">
+                <span className="text-slate-500 block text-[10px] uppercase font-mono mb-1">Public Key (Ed25519)</span>
+                <span className="font-mono text-slate-300 text-[10px] break-all block">
+                  {diagnostics?.publicKeyHex || keyPair?.publicKeyHex || 'None'}
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 pt-1 text-center text-xs">
+              <div className="p-2 bg-slate-950 rounded-lg border border-slate-850">
+                <span className="text-[10px] text-slate-500 block">Customers</span>
+                <span className="font-mono text-white font-bold">{diagnostics?.customersCount ?? 0}</span>
+              </div>
+              <div className="p-2 bg-slate-950 rounded-lg border border-slate-850">
+                <span className="text-[10px] text-slate-500 block">Licenses</span>
+                <span className="font-mono text-white font-bold">{diagnostics?.historyCount ?? 0}</span>
+              </div>
+              <div className="p-2 bg-slate-950 rounded-lg border border-slate-850">
+                <span className="text-[10px] text-slate-500 block">Custom Apps</span>
+                <span className="font-mono text-white font-bold">{diagnostics?.customAppsCount ?? 0}</span>
+              </div>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-[11px] text-indigo-300 flex items-start gap-2">
+              <Key className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
+              <span>
+                <strong>Isolated Security Architecture:</strong> Ed25519 private keys are never returned to the Renderer process or displayed in the UI.
+              </span>
+            </div>
+          </div>
 
           {/* Keypair Card */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-sm space-y-5">
@@ -596,7 +703,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <strong className="text-slate-300 ml-1">Zero plaintext private keys are ever exported</strong>. Restoring requires Master Password verification and keypair identity derivation checks.
             </p>
 
-            <div>
+            <div className="flex flex-wrap gap-2.5">
               <button
                 onClick={handleDownloadBackup}
                 className="px-4 py-2.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center gap-1.5 transition shadow-sm"
@@ -604,6 +711,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <Download className="w-3.5 h-3.5" />
                 <span>Export Encrypted Backup (.json)</span>
               </button>
+
+              {onOpenMigration && (
+                <button
+                  onClick={onOpenMigration}
+                  className="px-4 py-2.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-750 text-indigo-300 border border-indigo-500/30 flex items-center gap-1.5 transition shadow-sm"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Import Existing ALCO Authority</span>
+                </button>
+              )}
             </div>
 
             {/* Hardened Restore Workflow */}

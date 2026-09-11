@@ -13,6 +13,7 @@ import { ElectronFileStorageService } from './services/storage-service';
 import { MainVaultService } from './services/vault-service';
 import { MainSigningService } from './services/signing-service';
 import { MainBackupService } from './services/backup-service';
+import { MainMigrationService } from './services/migration-service';
 import { registerIpcHandlers } from './ipc/handlers';
 import { isAllowedAppNavigation } from './navigation-security';
 
@@ -75,9 +76,10 @@ app.whenReady().then(() => {
   vaultService = new MainVaultService(storageService);
   const signingService = new MainSigningService(vaultService, storageService);
   const backupService = new MainBackupService(storageService, vaultService);
+  const migrationService = new MainMigrationService(storageService, vaultService);
 
   // Register strictly typed IPC handlers
-  registerIpcHandlers(vaultService, signingService, storageService, backupService);
+  registerIpcHandlers(vaultService, signingService, storageService, backupService, migrationService);
 
   createWindow();
 

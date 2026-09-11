@@ -38,7 +38,13 @@ export const ALCO_IPC_CHANNELS = {
   BACKUP_VALIDATE: 'alco:backup:validate',
   BACKUP_VERIFY: 'alco:backup:verify',
   BACKUP_COMMIT: 'alco:backup:commit',
-  BACKUP_CANCEL: 'alco:backup:cancel'
+  BACKUP_CANCEL: 'alco:backup:cancel',
+
+  // Migration & Diagnostics (Phase 4)
+  MIGRATION_STAGE: 'alco:migration:stage',
+  MIGRATION_COMMIT: 'alco:migration:commit',
+  MIGRATION_CANCEL: 'alco:migration:cancel',
+  DIAGNOSTICS_GET: 'alco:diagnostics:get'
 } as const;
 
 export type AlcoIpcChannel = typeof ALCO_IPC_CHANNELS[keyof typeof ALCO_IPC_CHANNELS];

@@ -163,6 +163,58 @@ export interface BackupRestoreResult {
 }
 
 // ==========================================
+// Safe Authority Migration IPC (Phase 4)
+// ==========================================
+
+export interface MigrationProof {
+  proofId: string;
+  backupFingerprint: string;
+  backupPublicKeyHex: string;
+  recordCount: number;
+  customerCount: number;
+  customAppsCount: number;
+  hasSettings: boolean;
+  issuedAt: number;
+  expiresAt: number;
+}
+
+export interface MigrationStageResult {
+  success: boolean;
+  error?: string;
+  proof?: MigrationProof;
+  backupFingerprint?: string;
+  backupPublicKeyHex?: string;
+  customerCount?: number;
+  historyCount?: number;
+  customAppsCount?: number;
+  hasSettings?: boolean;
+  hasExistingVault?: boolean;
+  existingFingerprint?: string;
+}
+
+export interface MigrationCommitInput {
+  proof: MigrationProof;
+  overwriteExisting?: boolean;
+}
+
+export interface RuntimeDiagnostics {
+  storageLocation: string;
+  status: VaultStatus;
+  fingerprint?: string;
+  publicKeyHex?: string;
+  customersCount: number;
+  historyCount: number;
+  customAppsCount: number;
+}
+
+export interface MigrationCommitResult {
+  success: boolean;
+  error?: string;
+  message?: string;
+  diagnostics?: RuntimeDiagnostics;
+}
+
+// ==========================================
 // Window.alcoLicense Renderer API
 // ==========================================
 
@@ -201,4 +253,10 @@ export interface IAlcoLicenseRendererApi {
   verifyBackupDecryption(backup: AlcoBackupPayload, password: string): Promise<BackupVerificationResult>;
   commitRestoreBackup(proof: BackupVerificationProof): Promise<BackupRestoreResult>;
   cancelStagedRestore(): Promise<{ success: boolean }>;
+
+  // Safe Authority Migration (Phase 4)
+  stageAuthorityMigration(rawJson: string, masterPassword: string): Promise<MigrationStageResult>;
+  commitAuthorityMigration(input: MigrationCommitInput): Promise<MigrationCommitResult>;
+  cancelAuthorityMigration(): Promise<{ success: boolean }>;
+  getRuntimeDiagnostics(): Promise<RuntimeDiagnostics>;
 }
