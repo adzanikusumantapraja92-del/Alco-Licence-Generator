@@ -784,18 +784,44 @@ const fallbackService = new BrowserAuthorityFallback();
  */
 export function getAuthorityClient(): IAlcoLicenseRendererApi {
   if (typeof window !== 'undefined' && (window as any).alcoLicense) {
-    const client = (window as any).alcoLicense;
-    if (!client.recoverLegacyAuthority) {
-      client.recoverLegacyAuthority = async () => ({
+    const electronClient = (window as any).alcoLicense as IAlcoLicenseRendererApi;
+    return {
+      getVaultStatus: () => electronClient.getVaultStatus(),
+      setupVault: (input) => electronClient.setupVault(input),
+      recoverLegacyAuthority: electronClient.recoverLegacyAuthority
+        ? (input) => electronClient.recoverLegacyAuthority!(input)
+        : async () => ({
         success: false,
         status: 'uninitialized',
         fingerprint: '',
         publicKeyHex: '',
         createdAt: '',
         error: 'Legacy browser recovery is only supported in browser mode.'
-      });
-    }
-    return client;
+      }),
+      unlockVault: (input) => electronClient.unlockVault(input),
+      lockVault: () => electronClient.lockVault(),
+      changePassword: (input) => electronClient.changePassword(input),
+      generateLicense: (input) => electronClient.generateLicense(input),
+      getCustomers: () => electronClient.getCustomers(),
+      upsertCustomer: (input) => electronClient.upsertCustomer(input),
+      getHistory: () => electronClient.getHistory(),
+      saveLicenseRecord: (record) => electronClient.saveLicenseRecord(record),
+      updateLicenseStatus: (id, status) => electronClient.updateLicenseStatus(id, status),
+      deleteLicenseRecord: (id) => electronClient.deleteLicenseRecord(id),
+      getCustomApps: () => electronClient.getCustomApps(),
+      saveCustomApps: (apps) => electronClient.saveCustomApps(apps),
+      getSettings: () => electronClient.getSettings(),
+      saveSettings: (settings) => electronClient.saveSettings(settings),
+      exportBackup: () => electronClient.exportBackup(),
+      validateBackup: (rawJson) => electronClient.validateBackup(rawJson),
+      verifyBackupDecryption: (backup, password) => electronClient.verifyBackupDecryption(backup, password),
+      commitRestoreBackup: (proof) => electronClient.commitRestoreBackup(proof),
+      cancelStagedRestore: () => electronClient.cancelStagedRestore(),
+      stageAuthorityMigration: (rawJson, masterPassword) => electronClient.stageAuthorityMigration(rawJson, masterPassword),
+      commitAuthorityMigration: (input) => electronClient.commitAuthorityMigration(input),
+      cancelAuthorityMigration: () => electronClient.cancelAuthorityMigration(),
+      getRuntimeDiagnostics: () => electronClient.getRuntimeDiagnostics()
+    };
   }
   return fallbackService;
 }
