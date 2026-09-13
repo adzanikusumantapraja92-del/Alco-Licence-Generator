@@ -3,17 +3,19 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "main": ".electron-dev/main.cjs",
+  "main": ".electron-prod/main.cjs",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js .electron-dev",
+    "clean": "rm -rf dist server.js .electron-dev .electron-prod dist-electron",
     "lint": "tsc --noEmit",
     "test": "tsx scripts/test-hardening.ts && tsx scripts/test-customer-identity.ts && tsx scripts/test-electron-security.ts && tsx scripts/test-migration.ts && tsx scripts/test-legacy-recovery.ts",
     "desktop:compile": "esbuild electron/main.ts --bundle --platform=node --format=cjs --external:electron --sourcemap --outfile=.electron-dev/main.cjs && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --sourcemap --outfile=.electron-dev/preload.cjs",
+    "desktop:compile:prod": "esbuild electron/main.ts --bundle --platform=node --format=cjs --external:electron --sourcemap --outfile=.electron-prod/main.cjs && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --sourcemap --outfile=.electron-prod/preload.cjs",
     "desktop:start": "cross-env VITE_DEV_SERVER_URL=http://localhost:3000 electron .electron-dev/main.cjs",
-    "desktop:dev": "npm run desktop:compile && concurrently -k --names \"vite,electron\" -c \"cyan,magenta\" \"vite --port=3000 --host=0.0.0.0\" \"wait-on http://localhost:3000 && npm run desktop:start\""
+    "desktop:dev": "npm run desktop:compile && concurrently -k --names \"vite,electron\" -c \"cyan,magenta\" \"vite --port=3000 --host=0.0.0.0\" \"wait-on http://localhost:3000 && npm run desktop:start\"",
+    "desktop:build": "npm run build && npm run desktop:compile:prod && electron-builder --win"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -35,6 +37,7 @@
     "concurrently": "^10.0.5",
     "cross-env": "^10.1.0",
     "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",

@@ -22,10 +22,14 @@ let mainWindow: BrowserWindow | null = null;
 let vaultService: MainVaultService | null = null;
 
 function createWindow(): void {
-  // Preload location: In development (.electron-dev/preload.cjs) or production build
-  const preloadCjs = path.join(__dirname, 'preload.cjs');
-  const preloadJs = path.join(__dirname, 'preload.js');
-  const preloadPath = fs.existsSync(preloadCjs) ? preloadCjs : preloadJs;
+  // Preload location: In development (.electron-dev/preload.cjs) or production build (.electron-prod/preload.cjs)
+  const preloadCandidates = [
+    path.join(__dirname, 'preload.cjs'),
+    path.join(__dirname, 'preload.js'),
+    path.join(app.getAppPath(), '.electron-prod/preload.cjs'),
+    path.join(app.getAppPath(), '.electron-dev/preload.cjs'),
+  ];
+  const preloadPath = preloadCandidates.find(p => fs.existsSync(p)) || path.join(__dirname, 'preload.cjs');
 
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -63,7 +67,12 @@ function createWindow(): void {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
     // Production dist loading
-    const indexPath = path.join(__dirname, '../dist/index.html');
+    const indexCandidates = [
+      path.join(__dirname, '../dist/index.html'),
+      path.join(app.getAppPath(), 'dist/index.html'),
+      path.join(__dirname, 'dist/index.html'),
+    ];
+    const indexPath = indexCandidates.find(p => fs.existsSync(p)) || path.join(__dirname, '../dist/index.html');
     mainWindow.loadFile(indexPath);
   }
 
