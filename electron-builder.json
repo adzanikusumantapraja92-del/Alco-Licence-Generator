@@ -29,6 +29,7 @@
     "main": ".electron-prod/main.cjs"
   },
   "win": {
+    "icon": "build/icon.ico",
     "target": [
       {
         "target": "nsis",
@@ -39,8 +40,7 @@
         "arch": ["x64"]
       }
     ],
-    "executableName": "ALCO License Generator",
-    "signAndEditExecutable": false
+    "executableName": "ALCO License Generator"
   },
   "nsis": {
     "oneClick": false,

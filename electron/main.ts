@@ -31,6 +31,15 @@ function createWindow(): void {
   ];
   const preloadPath = preloadCandidates.find(p => fs.existsSync(p)) || path.join(__dirname, 'preload.cjs');
 
+  // Window Icon resolution (development and production paths)
+  const iconCandidates = [
+    path.join(app.getAppPath(), 'build/icon.ico'),
+    path.join(__dirname, '../build/icon.ico'),
+    path.join(__dirname, 'build/icon.ico'),
+    path.join(process.cwd(), 'build/icon.ico')
+  ];
+  const iconPath = iconCandidates.find(p => fs.existsSync(p));
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -38,6 +47,7 @@ function createWindow(): void {
     minHeight: 700,
     title: 'ALCO License Generator — Owner Licensing Authority',
     backgroundColor: '#020617', // slate-950
+    ...(iconPath ? { icon: iconPath } : {}),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
